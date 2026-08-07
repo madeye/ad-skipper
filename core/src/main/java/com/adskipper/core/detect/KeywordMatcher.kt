@@ -5,9 +5,17 @@ package com.adskipper.core.detect
  * Returns the matched keyword, or null.
  */
 object KeywordMatcher {
-    fun matches(text: String?, keywords: Collection<String>): String? {
+    /** [excluded]: exact texts that must never count as a hit — e.g. this
+     *  app's own label "广告跳过" contains the keyword "跳过", so every surface
+     *  listing installed apps (launcher search, app stores) would match it. */
+    fun matches(
+        text: String?,
+        keywords: Collection<String>,
+        excluded: Collection<String> = emptySet(),
+    ): String? {
         if (text.isNullOrBlank()) return null
         val lower = text.trim().lowercase()
+        if (excluded.any { lower == it.trim().lowercase() }) return null
         return keywords.firstOrNull { kw ->
             kw.isNotBlank() && lower.contains(kw.trim().lowercase())
         }

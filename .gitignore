@@ -18,5 +18,8 @@ local.properties
 # llama.cpp vendored source (fetched at build time, see README)
 core/src/main/cpp/llama.cpp/
 
+# ncnn prebuilt static libs (fetched from GitHub releases, see README)
+core/src/main/cpp/ncnn/
+
 # Downloaded models
 *.gguf

@@ -25,6 +25,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -34,7 +35,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.adskipper.AdSkipperApp
 import com.adskipper.core.data.AppSettings
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 @Composable
 fun SettingsScreen() {
@@ -61,7 +64,7 @@ fun SettingsScreen() {
                 SettingSwitch("L2 本地 OCR（~100ms）", settings.layer2Enabled) {
                     scope.launch { app.settingsRepo.setLayer2Enabled(it) }
                 }
-                SettingSwitch("L3 本地视觉大模型（需下载模型）", settings.layer3Enabled) {
+                SettingSwitch("L3 本地视觉检测（内置检测器 + 可选下载大模型）", settings.layer3Enabled) {
                     scope.launch { app.settingsRepo.setLayer3Enabled(it) }
                 }
             }
@@ -146,14 +149,22 @@ private fun SettingSwitch(label: String, checked: Boolean, onChange: (Boolean) -
 @Composable
 private fun WhitelistPicker(whitelist: Set<String>, onChange: (Set<String>) -> Unit) {
     val context = LocalContext.current
-    val apps = remember {
-        val pm = context.packageManager
-        val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
-        pm.queryIntentActivities(intent, PackageManager.ResolveInfoFlags.of(0))
-            .map { it.activityInfo.packageName to it.loadLabel(pm).toString() }
-            .distinctBy { it.first }
-            .sortedBy { it.second }
-            .filter { it.first != context.packageName }
+    // queryIntentActivities + loadLabel per app take ~1s; keep them off the
+    // main thread so switching to this tab doesn't jank.
+    val apps by produceState(initialValue = emptyList<Pair<String, String>>()) {
+        value = withContext(Dispatchers.IO) {
+            val pm = context.packageManager
+            val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+            pm.queryIntentActivities(intent, PackageManager.ResolveInfoFlags.of(0))
+                .map { it.activityInfo.packageName to it.loadLabel(pm).toString() }
+                .distinctBy { it.first }
+                .sortedBy { it.second }
+                .filter { it.first != context.packageName }
+        }
+    }
+    if (apps.isEmpty()) {
+        Text("加载应用列表…", style = MaterialTheme.typography.bodySmall)
+        return
     }
     Column {
         apps.forEach { (pkg, label) ->

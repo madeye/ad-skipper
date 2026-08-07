@@ -8,7 +8,11 @@ import android.view.accessibility.AccessibilityNodeInfo
  */
 object NodeMatcher {
 
-    fun findSkipNode(root: AccessibilityNodeInfo?, keywords: Collection<String>): Rect? {
+    fun findSkipNode(
+        root: AccessibilityNodeInfo?,
+        keywords: Collection<String>,
+        excluded: Collection<String> = emptySet(),
+    ): Rect? {
         root ?: return null
         val clickableHits = ArrayList<Rect>()
         val otherHits = ArrayList<Rect>()
@@ -18,10 +22,10 @@ object NodeMatcher {
             val node = queue.removeFirst()
             if (node.isVisibleToUser) {
                 val textMatch =
-                    KeywordMatcher.matches(node.text?.toString(), keywords)
+                    KeywordMatcher.matches(node.text?.toString(), keywords, excluded)
                         ?.takeIf { KeywordMatcher.isPlausibleButtonText(node.text?.toString()) }
                 val descMatch =
-                    KeywordMatcher.matches(node.contentDescription?.toString(), keywords)
+                    KeywordMatcher.matches(node.contentDescription?.toString(), keywords, excluded)
                         ?.takeIf { KeywordMatcher.isPlausibleButtonText(node.contentDescription?.toString()) }
                 val idMatch = KeywordMatcher.matches(
                     node.viewIdResourceName?.substringAfterLast('/'), keywords)

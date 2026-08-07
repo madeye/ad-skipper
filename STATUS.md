@@ -4,7 +4,66 @@
 
 ## 当前任务状态（TODO）
 
-- [x] 内置 SmolVLM2 256M (Q8_0, ~266MB) 到 APK assets 并设为默认模型
+- [x] VLM 模型选型基准测试（2026-08-07，harness 在 `/Volumes/DATA/workspace/vlm-bench/`，
+  详见其 REPORT.md）：20 张合成开屏广告 + GT 框，8 个候选 GGUF 模型 × 4 种输入
+  分辨率 × 多种坐标约定。结论：
+  - **旧配置（448px + yxyx 归一化 prompt/parser）所有模型 0/20 命中**，三个叠加
+    原因：448px 太小（跳过按钮仅 ~30×15px）；模型实际回答 xyxy（InternVL/MiniCPM
+    为 0-1000 归一化，Qwen2.5-VL 为输入图绝对像素）；BboxParser 的数字正则会把
+    JSON key `bbox_2d` 里的 2 当成第一个坐标。
+  - **最优折中：InternVL3-2B Q4_K_M + Q8_0 mmproj（1.46GB）@896px：16/20 命中、
+    0 次误点 CTA**。Qwen2.5-VL-3B @672px 也是 16/20 但体积 2.8GB 且有 1 次误点
+    CTA；MiniCPM-V 2.6（5.7GB，8/20）与 Qwen2-VL-2B（2.3GB，≤5/20）被碾压；
+    ≤1B 的模型（SmolVLM2 256M/500M、LFM2-VL、InternVL3-1B）全部 0-3/20，无
+    grounding 能力。Qwen 的 Q8_0 mmproj 与 f16 精度一致（省 0.5GB）。
+- [x] 按基准结论重构 L3（feature/internvl3-2b-default 分支）：prompt 改为
+  JSON bbox_2d xyxy、BboxParser 重写（方括号组提取 + 按模型 CoordSpace 解析）、
+  MAX_DIM 按模型（896/672）、vlmTimeoutMs 默认 4s→8s、目录仅保留
+  InternVL3-2B / Qwen2.5-VL / 自定义。APK 不再内置任何 VLM（2B 太大，
+  256M 无用）：L3 需先在模型页下载 InternVL3-2B，未下载时自动跳过
+- [x] 内置 SmolVLM2 256M (Q8_0, ~266MB) 到 APK assets 并设为默认模型（已
+  移除：基准测试证明其无 grounding 能力，0/20）
+- [x] 训练轻量 YOLO 跳过按钮检测器并内置 APK（L3a 层），VLM 降级为可选下载
+  兜底（L3b）：YOLO11n 在 2400 张合成开屏广告上训练，基准 19/20 命中、0 次
+  误点 CTA、host 21ms；导出 fp32 TFLite 10.6MB 内置 assets（APK 共 123MB）。
+  训练/导出管线在 `/Volumes/DATA/workspace/vlm-bench/`（gen_yolo_data.py /
+  eval_yolo.py / runs/detect/yolo_runs/）。
+  - 首次真机（模拟器）验证暴露纯合成训练的误报问题：launcher/设置等真实界面
+    16/16 出现 ≥0.35 置信度的假阳性 → 三重修复：(1) 截取真实系统界面做负样本
+    微调（12 屏 ×25 增广 = 300 张，4 屏留作验证）；(2) 置信度阈值 0.35→0.55；
+    (3) AdSkipperService 增加「开屏窗口期」门控 — 图像类 L3 仅在应用会话开始
+    8s 内运行（20s 无事件视为新会话），自测模式豁免；默认白名单扩充常见
+    launcher。
+  - GPU 加速（改用 ggml Vulkan，弃用 TFLite）：TFLite GPU delegate 依赖
+    OpenGL ES 3.1，覆盖面差；改为把 YOLO11n 直接跑在仓库已有的 ggml Vulkan
+    后端上（与 L3b VLM 同一后端），只需 Vulkan 1.0。实现：
+    - `vlm-bench/ggml-yolo/convert.py` 把 YOLO11n ONNX 转成 `yolo.gguf`（权重，
+      ggml layout）+ `yolo.prog`（319 节点 op-program，具体属性）+ ORT 逐节点
+      参考；`run_host.cpp`（链接 host ggml，CPU）逐节点对齐 ORT，output0
+      relmax=4.7e-4 PASS（含 C2PSA attention 与 DFL 解码）。
+    - `core/src/main/cpp/yolo_jni.cpp`：ggml-backend 载入 gguf+prog，
+      GPU(Vulkan)→CPU 自动回退，构图一次、每帧 set 输入/compute/取 output0；
+      `YoloNative.kt`/`YoloSkipDetector.kt` 首启把 gguf/prog 解压到 filesDir，
+      解码沿用原 [1,5,8400] 逻辑（布局一致）。CMake 新增 `yolo_jni` 目标（链接
+      ggml）。已移除 TFLite 依赖与 `skip_detector.tflite`、force_gpu 调试开关。
+    - 关键转换点：ggml ne = ONNX dims 反序（conv 权重 [OC,IC,KH,KW] 直接当
+      [KW,KH,IC,OC]）；ggml_permute 轴映射需 `axis_i = r-1-argwhere(perm==r-1-i)`；
+      depthwise conv 走 `ggml_conv_2d_dw`（内部强制 F16 im2col → 核 cast F16）；
+      两处 softmax 均为 ne[0]。
+    - 构建通过，APK 116MB（含 libggml-vulkan.so 53MB + libyolo_jni.so + 10MB
+      gguf），已装到真机（小米 14 Ultra / Adreno 750 / Vulkan 1.3）。真机
+      GPU 端到端确认待用户手动开启无障碍服务（HyperOS 禁止 adb 写
+      secure settings，无法脚本开启）。
+  - ggml-Vulkan 真机不可用 → 改用 ncnn（feature/yolo-ncnn 分支，2026-08-07）：
+    ggml Vulkan 后端面向桌面 GPU，Adreno 真机跑不通；换成 ncnn（Vulkan
+    compute + CPU/NEON 回退，内置 Adreno/Mali 驱动 workaround，simplevk 自带
+    loader 不依赖 NDK libvulkan）。模型改用 Ultralytics 官方 NCNN 导出
+    （`yolo export format=ncnn half=True`，fp16 5.1MB，in0→out0），val 集
+    mAP50 0.992 / P 0.98 / R 0.972，与原权重一致 — 整个 ggml-yolo 手写
+    转换管线不再需要。`yolo_jni.cpp` 重写为 ncnn Net/Extractor（先试
+    Vulkan，load 失败回退 CPU）；assets 换成 yolo.ncnn.param/bin；ncnn
+    20260526 android-vulkan 预编译静态库 vendored 到 `core/src/main/cpp/ncnn/`
+    （gitignored，README 有下载步骤）；链接 `-static-openmp`。
 - [x] Vulkan GPU 后端编译 + L3 端到端验证
   - 模拟器 logcat 确认 Vulkan 后端生效：
     `llama_prepare_model_devices: using device Vulkan0 (Goldfish GFXStream (Apple M4)) - 25005 MiB free`，
@@ -74,7 +133,11 @@
 
 ## 待验证 / 风险
 
-- SmolVLM2 256M grounding 能力有限，复杂按钮可能定位不准（L3 是兜底层，可接受）。
+- InternVL3-2B @896px 的真机延迟未实测（host 基准含加载约 3s；896px 的图像
+  token 是 448px 的 4 倍）。若旗舰机也压不进 ~2s，可考虑 Qwen2.5-VL-3B @672px
+  （精度同为 16/20，但要多下 1.3GB 且基准中有 1 次误点 CTA）。
+- APK 含内置模型约 1.5GB，Play 商店 AAB 限制下无法直接上架，需改用
+  Play Asset Delivery 或首启下载（当前按侧载分发考虑）。
 - llama.cpp pin 在 master `a1f96d4`（2026-08-06 浅克隆）；升级需重验 mtmd API。
 - 目前仅在模拟器（Goldfish GFXStream / Apple M4 host）验证过 Vulkan 路径，真机
   GPU（各厂商驱动）尚未实测，需注意驱动差异导致的扩展支持不一致。

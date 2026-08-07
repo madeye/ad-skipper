@@ -65,6 +65,7 @@ class AdSkipperService : AccessibilityService() {
 
     override fun onServiceConnected() {
         Timber.i("AdSkipperService connected")
+        startKeepaliveForeground()
         settingsRepo = SettingsRepository(this)
         statsRepo = StatsRepository(this)
         modelManager = ModelManager(this)
@@ -87,6 +88,32 @@ class AdSkipperService : AccessibilityService() {
                     loadActiveModel(new)
                 }
             }
+        }
+    }
+
+    /** Promote to a foreground service so aggressive OEM task killers don't
+     *  reap the process. Best-effort: the service still works without it. */
+    private fun startKeepaliveForeground() {
+        try {
+            val channel = android.app.NotificationChannel(
+                KEEPALIVE_CHANNEL_ID,
+                "运行状态",
+                android.app.NotificationManager.IMPORTANCE_MIN,
+            )
+            getSystemService(android.app.NotificationManager::class.java)
+                .createNotificationChannel(channel)
+            val notification = android.app.Notification.Builder(this, KEEPALIVE_CHANNEL_ID)
+                .setSmallIcon(android.R.drawable.ic_menu_view)
+                .setContentTitle("广告跳过运行中")
+                .setOngoing(true)
+                .build()
+            startForeground(
+                KEEPALIVE_NOTIFICATION_ID,
+                notification,
+                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE,
+            )
+        } catch (t: Throwable) {
+            Timber.e(t, "startForeground failed")
         }
     }
 
@@ -216,6 +243,9 @@ class AdSkipperService : AccessibilityService() {
         /** Gap without events after which the next event starts a new session. */
         private const val SESSION_GAP_MS = 20_000L
         private const val TAP_DURATION_MS = 50L
+
+        private const val KEEPALIVE_CHANNEL_ID = "keepalive"
+        private const val KEEPALIVE_NOTIFICATION_ID = 1
 
         /** Home-screen companion surfaces that are separate packages from the
          *  launcher (search overlay, minus-one screen). They list installed

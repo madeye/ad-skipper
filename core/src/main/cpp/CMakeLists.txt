@@ -133,10 +133,24 @@ target_link_options(vlm_jni PRIVATE "-Wl,-z,max-page-size=16384")
 find_library(log_lib log)
 target_link_libraries(vlm_jni PRIVATE mtmd llama ${log_lib} jnigraphics android)
 
-# Native YOLO detector: runs a converted YOLO11n op-program on the ggml
-# Vulkan backend (CPU fallback). Links ggml directly (no llama/mtmd needed).
+# Native YOLO detector: Ultralytics NCNN export running on ncnn (Vulkan
+# compute with CPU/NEON fallback). Uses the prebuilt static ncnn (vendored
+# here, gitignored — see README). simplevk: ncnn dlopens the Vulkan driver
+# itself, so no NDK libvulkan is linked.
+set(NCNN_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/ncnn)
+set(ncnn_DIR ${NCNN_ROOT}/${ANDROID_ABI}/lib/cmake/ncnn)
+if (NOT EXISTS ${ncnn_DIR}/ncnnConfig.cmake)
+    message(FATAL_ERROR
+        "ncnn prebuilt not found at ${NCNN_ROOT}/${ANDROID_ABI}\n"
+        "Run: gh release download 20260526 -R Tencent/ncnn -p ncnn-20260526-android-vulkan.zip\n"
+        "     unzip ncnn-20260526-android-vulkan.zip && mv ncnn-20260526-android-vulkan ${NCNN_ROOT}")
+endif()
+find_package(ncnn REQUIRED)
+
 add_library(yolo_jni SHARED yolo_jni.cpp)
-target_include_directories(yolo_jni PRIVATE ${LLAMA_SRC}/ggml/include)
 target_compile_features(yolo_jni PRIVATE cxx_std_17)
 target_link_options(yolo_jni PRIVATE "-Wl,-z,max-page-size=16384")
-target_link_libraries(yolo_jni PRIVATE ggml ${log_lib} jnigraphics android)
+# ncnn threads on the NDK's OpenMP; link it statically so no libomp.so needs
+# packaging.
+target_link_options(yolo_jni PRIVATE -fopenmp -static-openmp)
+target_link_libraries(yolo_jni PRIVATE ncnn ${log_lib} jnigraphics android)

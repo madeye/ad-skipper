@@ -12,14 +12,15 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
 /**
- * L3 fast path: bundled YOLO11n skip-button detector running on the ggml
- * Vulkan backend (CPU fallback), the same backend the L3 VLM uses.
+ * L3 fast path: bundled YOLO11n skip-button detector running on ncnn
+ * (Vulkan compute, CPU/NEON fallback).
  *
- * The model is a converted YOLO11n op-program (assets/yolo.gguf + yolo.prog,
- * produced and numerically validated against ONNX Runtime by
- * vlm-bench/ggml-yolo/). It scores 20/20 on the grounding benchmark with zero
- * false positives on real app screens, and — unlike the previous TFLite GPU
- * delegate — needs only Vulkan 1.0, not OpenGL ES 3.1.
+ * The model is the official Ultralytics NCNN export of the trained skip_v2
+ * weights (assets/yolo.ncnn.param + yolo.ncnn.bin, fp16). Validated against
+ * the original weights: mAP50 0.992 / P 0.98 / R 0.972 on the 240-image val
+ * set. ncnn is used instead of ggml-vulkan or the TFLite GPU delegate because
+ * its Vulkan backend carries the mobile (Adreno/Mali) driver workarounds and
+ * ships its own loader, so it degrades cleanly to NEON when Vulkan is broken.
  *
  * All native work is confined to a single thread so the Vulkan device/queue
  * is used consistently.
@@ -38,10 +39,10 @@ class YoloSkipDetector(private val context: Context) {
     /** Asset presence is the readiness signal; the native engine is built
      *  lazily on the executor thread at first use. */
     val isReady: Boolean = try {
-        context.assets.openFd(GGUF_ASSET).use { true }
+        context.assets.openFd(BIN_ASSET).use { true }
     } catch (t: Throwable) {
         // openFd throws for compressed assets; fall back to a stream probe.
-        try { context.assets.open(GGUF_ASSET).use { true } } catch (e: Throwable) {
+        try { context.assets.open(BIN_ASSET).use { true } } catch (e: Throwable) {
             Timber.e(e, "YOLO assets missing"); false
         }
     }
@@ -100,16 +101,16 @@ class YoloSkipDetector(private val context: Context) {
     private fun ensureInit(): Boolean {
         if (initTried) return initOk
         initTried = true
-        val gguf = extractAsset(GGUF_ASSET)
-        val prog = extractAsset(PROG_ASSET)
-        if (gguf == null || prog == null) { backend = "error"; return false }
+        val param = extractAsset(PARAM_ASSET)
+        val bin = extractAsset(BIN_ASSET)
+        if (param == null || bin == null) { backend = "error"; return false }
         backend = try {
-            YoloNative.nativeInit(gguf.absolutePath, prog.absolutePath)
+            YoloNative.nativeInit(param.absolutePath, bin.absolutePath)
         } catch (t: Throwable) {
             Timber.e(t, "nativeInit crashed"); "error"
         }
         initOk = backend != "error"
-        Timber.i("YOLO ggml engine: %s", backend)
+        Timber.i("YOLO ncnn engine: %s", backend)
         return initOk
     }
 
@@ -146,8 +147,8 @@ class YoloSkipDetector(private val context: Context) {
     }
 
     private companion object {
-        const val GGUF_ASSET = "yolo.gguf"
-        const val PROG_ASSET = "yolo.prog"
+        const val PARAM_ASSET = "yolo.ncnn.param"
+        const val BIN_ASSET = "yolo.ncnn.bin"
         const val IN_SIZE = 640
         const val ANCHORS = 8400
         const val CONF_THRESHOLD = 0.55f

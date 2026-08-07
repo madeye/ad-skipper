@@ -54,6 +54,16 @@
       gguf），已装到真机（小米 14 Ultra / Adreno 750 / Vulkan 1.3）。真机
       GPU 端到端确认待用户手动开启无障碍服务（HyperOS 禁止 adb 写
       secure settings，无法脚本开启）。
+  - ggml-Vulkan 真机不可用 → 改用 ncnn（feature/yolo-ncnn 分支，2026-08-07）：
+    ggml Vulkan 后端面向桌面 GPU，Adreno 真机跑不通；换成 ncnn（Vulkan
+    compute + CPU/NEON 回退，内置 Adreno/Mali 驱动 workaround，simplevk 自带
+    loader 不依赖 NDK libvulkan）。模型改用 Ultralytics 官方 NCNN 导出
+    （`yolo export format=ncnn half=True`，fp16 5.1MB，in0→out0），val 集
+    mAP50 0.992 / P 0.98 / R 0.972，与原权重一致 — 整个 ggml-yolo 手写
+    转换管线不再需要。`yolo_jni.cpp` 重写为 ncnn Net/Extractor（先试
+    Vulkan，load 失败回退 CPU）；assets 换成 yolo.ncnn.param/bin；ncnn
+    20260526 android-vulkan 预编译静态库 vendored 到 `core/src/main/cpp/ncnn/`
+    （gitignored，README 有下载步骤）；链接 `-static-openmp`。
 - [x] Vulkan GPU 后端编译 + L3 端到端验证
   - 模拟器 logcat 确认 Vulkan 后端生效：
     `llama_prepare_model_devices: using device Vulkan0 (Goldfish GFXStream (Apple M4)) - 25005 MiB free`，

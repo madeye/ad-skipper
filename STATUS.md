@@ -16,12 +16,15 @@
     CTA；MiniCPM-V 2.6（5.7GB，8/20）与 Qwen2-VL-2B（2.3GB，≤5/20）被碾压；
     ≤1B 的模型（SmolVLM2 256M/500M、LFM2-VL、InternVL3-1B）全部 0-3/20，无
     grounding 能力。Qwen 的 Q8_0 mmproj 与 f16 精度一致（省 0.5GB）。
-- [x] 按基准结论重构 L3（feature/internvl3-2b-default 分支）：内置模型换成
-  InternVL3-2B（APK 增至 ~1.5GB）、prompt 改为 JSON bbox_2d xyxy、BboxParser
-  重写（方括号组提取 + 按模型 CoordSpace 解析）、MAX_DIM 按模型（896/672）、
-  vlmTimeoutMs 默认 4s→8s、目录仅保留 InternVL3-2B / Qwen2.5-VL / 自定义
-- [x] 内置 SmolVLM2 256M (Q8_0, ~266MB) 到 APK assets 并设为默认模型（已被
-  InternVL3-2B 替代，见上）
+- [x] 按基准结论重构 L3（feature/internvl3-2b-default 分支）：prompt 改为
+  JSON bbox_2d xyxy、BboxParser 重写（方括号组提取 + 按模型 CoordSpace 解析）、
+  MAX_DIM 按模型（896/672）、vlmTimeoutMs 默认 4s→8s、目录仅保留
+  InternVL3-2B / Qwen2.5-VL / 自定义。APK 不再内置任何 VLM（2B 太大，
+  256M 无用）：L3 需先在模型页下载 InternVL3-2B，未下载时自动跳过
+- [x] 内置 SmolVLM2 256M (Q8_0, ~266MB) 到 APK assets 并设为默认模型（已
+  移除：基准测试证明其无 grounding 能力，0/20）
+- [ ] 训练轻量 YOLO 跳过按钮检测器（~5-10MB，可内置 APK）作为新的默认本地
+  检测层，VLM 降级为可选下载的兜底 — 训练/评估进行中（vlm-bench）
 - [x] Vulkan GPU 后端编译 + L3 端到端验证
   - 模拟器 logcat 确认 Vulkan 后端生效：
     `llama_prepare_model_devices: using device Vulkan0 (Goldfish GFXStream (Apple M4)) - 25005 MiB free`，

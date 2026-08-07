@@ -47,12 +47,12 @@ object ModelCatalog {
         "https://hf-mirror.com/$repo/resolve/main/$file"
 
     /** Benchmark winner (16/20 grounding hits @896px, 0 CTA misclicks,
-     *  smallest capable model — see vlm-bench/REPORT.md). Bundled in the APK. */
+     *  smallest capable model — see vlm-bench/REPORT.md). Too large to bundle
+     *  in the APK; offered as the recommended download. */
     val internvl3v2b = ModelInfo(
         id = "internvl3-2b-q4km",
         displayName = "InternVL3 2B (Q4_K_M)",
-        description = "约 1.5GB，已内置在 App 中，开箱即用；定位准确率最佳",
-        bundled = true,
+        description = "约 1.5GB，定位准确率最佳，推荐首选",
         coordSpace = CoordSpace.NORM,
         maxDim = 896,
         files = listOf(

@@ -17,7 +17,8 @@ data class AppSettings(
     val masterEnabled: Boolean = true,
     val layer1Enabled: Boolean = true,
     val layer2Enabled: Boolean = true,
-    // L3 runs the bundled InternVL3-2B model by default (no download needed).
+    // L3 needs a downloaded model (InternVL3-2B recommended); until one is
+    // present the layer is skipped by the engine-not-ready check.
     val layer3Enabled: Boolean = true,
     val keywords: Set<String> = DEFAULT_KEYWORDS,
     val whitelist: Set<String> = DEFAULT_WHITELIST,

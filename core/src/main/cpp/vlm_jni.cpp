@@ -65,8 +65,16 @@ Java_com_adskipper_core_vlm_VlmEngine_nativeLoadModel(
 
     llama_backend_init();
 
+    // Forward llama/ggml logs to logcat (backend selection, timings, ...).
+    llama_log_set([](ggml_log_level level, const char * text, void *) {
+        __android_log_print(
+            level >= GGML_LOG_LEVEL_ERROR ? ANDROID_LOG_ERROR :
+            level >= GGML_LOG_LEVEL_WARN  ? ANDROID_LOG_WARN  : ANDROID_LOG_INFO,
+            "llama", "%s", text);
+    }, nullptr);
+
     llama_model_params mparams = llama_model_default_params();
-    mparams.n_gpu_layers = 0; // CPU only for now
+    mparams.n_gpu_layers = 99; // offload to Vulkan GPU when available, CPU otherwise
     g.model = llama_model_load_from_file(model_path, mparams);
     if (g.model == nullptr) {
         LOGE("failed to load model");
@@ -90,9 +98,10 @@ Java_com_adskipper_core_vlm_VlmEngine_nativeLoadModel(
     }
 
     mtmd_context_params mp = mtmd_context_params_default();
-    mp.use_gpu       = false;
+    mp.use_gpu       = true; // vision encoder on Vulkan GPU when available
     mp.print_timings = false;
     mp.n_threads     = threads;
+    mp.warmup        = false; // skip the load-time warmup encode pass
     g.mctx = mtmd_init_from_file(mmproj_path, g.model, mp);
     env->ReleaseStringUTFChars(jmodel_path, model_path);
     env->ReleaseStringUTFChars(jmmproj_path, mmproj_path);
@@ -183,28 +192,44 @@ Java_com_adskipper_core_vlm_VlmEngine_nativeInfer(
     const llama_vocab * vocab = llama_model_get_vocab(g.model);
     std::string out;
     out.reserve(256);
+    int n_gen = 0;
+    int32_t last_drc = 0;
+    bool hit_eog = false;
     for (int i = 0; i < max_tokens; i++) {
         llama_token t = llama_sampler_sample(g.smpl, g.lctx, -1);
-        if (llama_vocab_is_eog(vocab, t)) break;
+        if (llama_vocab_is_eog(vocab, t)) { hit_eog = true; break; }
         char piece[256];
         int n = llama_token_to_piece(vocab, t, piece, sizeof(piece), 0, true);
         if (n > 0) out.append(piece, n);
         llama_sampler_accept(g.smpl, t);
 
-        llama_batch batch = llama_batch_init(1, 0, 1);
-        batch.token[0]    = t;
-        batch.pos[0]      = n_past;
-        batch.n_seq_id[0] = 1;
-        batch.seq_id[0][0] = 0;
-        batch.logits[0]   = true;
+        // llama_batch_get_one sets n_tokens/pos/seq for a single-token decode
+        // (a hand-rolled llama_batch_init batch without n_tokens=1 is
+        // rejected by llama_decode with -1).
+        llama_token tok = t;
+        llama_batch batch = llama_batch_get_one(&tok, 1);
         int32_t drc = llama_decode(g.lctx, batch);
-        llama_batch_free(batch);
-        if (drc != 0) break;
+        if (drc != 0) { last_drc = drc; break; }
         n_past++;
+        n_gen++;
     }
 
-    LOGI("infer done, output: %s", out.c_str());
-    return env->NewStringUTF(out.c_str());
+    LOGI("infer done: %d tokens (eog=%d, last_decode_rc=%d), output: %s",
+         n_gen, (int) hit_eog, last_drc, out.c_str());
+    // NewStringUTF aborts on invalid Modified UTF-8, and token pieces are raw
+    // bytes: generation can stop mid multi-byte character (and emoji use
+    // 4-byte sequences NewStringUTF never accepts). Build the string through
+    // String(byte[], "UTF-8"), which substitutes U+FFFD instead of crashing.
+    jbyteArray bytes = env->NewByteArray((jsize) out.size());
+    env->SetByteArrayRegion(bytes, 0, (jsize) out.size(), (const jbyte *) out.data());
+    jclass string_cls = env->FindClass("java/lang/String");
+    jmethodID string_ctor = env->GetMethodID(string_cls, "<init>", "([BLjava/lang/String;)V");
+    jstring charset = env->NewStringUTF("UTF-8");
+    jstring result = (jstring) env->NewObject(string_cls, string_ctor, bytes, charset);
+    env->DeleteLocalRef(bytes);
+    env->DeleteLocalRef(charset);
+    env->DeleteLocalRef(string_cls);
+    return result;
 }
 
 extern "C" JNIEXPORT void JNICALL

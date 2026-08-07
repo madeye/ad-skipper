@@ -1,0 +1,22 @@
+diff --git a/ggml/src/ggml-vulkan/ggml-vulkan.cpp b/ggml/src/ggml-vulkan/ggml-vulkan.cpp
+index a923755..4c4fade 100644
+--- a/ggml/src/ggml-vulkan/ggml-vulkan.cpp
++++ b/ggml/src/ggml-vulkan/ggml-vulkan.cpp
+@@ -6780,7 +6780,16 @@ static vk_device ggml_vk_get_device(size_t idx) {
+             throw std::runtime_error("Unsupported device");
+         }
+ 
+-        device_extensions.push_back("VK_KHR_16bit_storage");
++        // Promoted to core in Vulkan 1.1. Some drivers (e.g. the Android
++        // emulator's gfxstream) support the feature but do not advertise the
++        // legacy extension name, and requesting it fails createDevice with
++        // ErrorExtensionNotPresent — only request it when advertised.
++        for (const auto& properties : ext_props) {
++            if (strcmp("VK_KHR_16bit_storage", properties.extensionName) == 0) {
++                device_extensions.push_back("VK_KHR_16bit_storage");
++                break;
++            }
++        }
+ 
+ #ifdef GGML_VULKAN_VALIDATE
+         device_extensions.push_back("VK_KHR_shader_non_semantic_info");

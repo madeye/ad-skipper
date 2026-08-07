@@ -13,6 +13,9 @@ data class ModelInfo(
     val displayName: String,
     val description: String,
     val files: List<ModelFile>,
+    /** True if the GGUF files ship inside the APK assets (assets/bundled_model/)
+     *  and are extracted to filesDir on first use. */
+    val bundled: Boolean = false,
 ) {
     val modelFile: ModelFile get() = files.first()
     val mmprojFile: ModelFile? get() = files.getOrNull(1)
@@ -95,7 +98,8 @@ object ModelCatalog {
     val smolvlm256m = ModelInfo(
         id = "smolvlm2-256m-q8",
         displayName = "SmolVLM2 256M (Q8_0)",
-        description = "仅约 266MB（模型 167MB + mmproj 99MB），最轻量、加载快，但定位能力有限",
+        description = "仅约 266MB，已内置在 App 中，开箱即用；定位能力有限",
+        bundled = true,
         files = listOf(
             ModelFile(
                 "SmolVLM2-256M-Video-Instruct-Q8_0.gguf",
@@ -127,7 +131,7 @@ object ModelCatalog {
 
     val all: List<ModelInfo> = listOf(qwen25vl3b, qwen2vl2b, smolvlm256m, minicpmv26, custom)
 
-    val default: ModelInfo get() = qwen25vl3b
+    val default: ModelInfo get() = smolvlm256m
 
     fun byId(id: String?): ModelInfo? = all.firstOrNull { it.id == id }
 }

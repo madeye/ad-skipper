@@ -6,6 +6,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import timber.log.Timber
@@ -31,13 +32,45 @@ class ModelManager(private val context: Context) {
     fun isDownloaded(model: ModelInfo): Boolean =
         model.files.all { f -> File(dirFor(model), f.name).let { it.exists() && it.length() > 0 } }
 
-    /** (modelPath, mmprojPath) if the model is fully downloaded. */
-    fun modelPaths(model: ModelInfo): Pair<String, String>? {
+    /** (modelPath, mmprojPath) if the model is usable; bundled models are
+     *  extracted from APK assets on first call. */
+    suspend fun modelPaths(model: ModelInfo): Pair<String, String>? {
+        if (model.bundled) extractBundled(model)
         if (!isDownloaded(model)) return null
         val dir = dirFor(model)
         val modelPath = File(dir, model.modelFile.name).absolutePath
         val mmproj = model.mmprojFile ?: return null
         return modelPath to File(dir, mmproj.name).absolutePath
+    }
+
+    /** Copy bundled GGUF files out of assets/bundled_model/ into filesDir.
+     *  Skips files that already exist with the right size. */
+    private suspend fun extractBundled(model: ModelInfo) = withContext(Dispatchers.IO) {
+        val dir = dirFor(model)
+        dir.mkdirs()
+        for (file in model.files) {
+            val target = File(dir, file.name)
+            val assetPath = "$BUNDLED_ASSET_DIR/${file.name}"
+            val assetSize = try {
+                context.assets.openFd(assetPath).use { it.length }
+            } catch (e: Exception) {
+                Timber.e(e, "bundled asset missing: %s", assetPath)
+                -1L
+            }
+            if (assetSize <= 0) continue
+            if (target.exists() && target.length() == assetSize) continue
+            Timber.i("extracting bundled model file %s (%d MB)", file.name, assetSize / 1048576)
+            val tmp = File(dir, "${file.name}.part")
+            context.assets.open(assetPath).use { input ->
+                tmp.outputStream().use { output -> input.copyTo(output) }
+            }
+            if (tmp.length() != assetSize) {
+                tmp.delete()
+                Timber.e("bundled extract size mismatch: %s", file.name)
+                continue
+            }
+            tmp.renameTo(target)
+        }
     }
 
     fun delete(model: ModelInfo) {
@@ -143,7 +176,7 @@ class ModelManager(private val context: Context) {
     }
 
     /** Import a user-picked file (SAF) into the custom model directory. */
-    suspend fun importCustomFile(uri: Uri, destName: String): File = kotlinx.coroutines.withContext(Dispatchers.IO) {
+    suspend fun importCustomFile(uri: Uri, destName: String): File = withContext(Dispatchers.IO) {
         val dir = dirFor(ModelCatalog.custom)
         dir.mkdirs()
         val dest = File(dir, destName)
@@ -151,5 +184,9 @@ class ModelManager(private val context: Context) {
             dest.outputStream().use { output -> input.copyTo(output) }
         } ?: error("cannot open $uri")
         dest
+    }
+
+    private companion object {
+        const val BUNDLED_ASSET_DIR = "bundled_model"
     }
 }

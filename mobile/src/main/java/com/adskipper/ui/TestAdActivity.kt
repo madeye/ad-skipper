@@ -30,7 +30,7 @@ class TestAdActivity : ComponentActivity() {
             gravity = Gravity.CENTER
         }
         val skip = Button(this).apply {
-            text = "跳过 5"
+            text = "跳过 30"
             contentDescription = "跳过广告"
         }
         skip.setOnClickListener { finish() }
@@ -45,7 +45,7 @@ class TestAdActivity : ComponentActivity() {
         root.addView(skip, lp)
         setContentView(root)
 
-        timer = object : CountDownTimer(5000, 1000) {
+        timer = object : CountDownTimer(30000, 1000) {
             override fun onTick(millisUntilFinished: Long) {
                 skip.text = "跳过 ${millisUntilFinished / 1000 + 1}"
             }

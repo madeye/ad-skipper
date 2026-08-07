@@ -1,6 +1,8 @@
 package com.adskipper.core.data
 
 import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
@@ -10,6 +12,7 @@ import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
+import timber.log.Timber
 
 private val Context.dataStore by preferencesDataStore(name = "settings")
 
@@ -82,6 +85,31 @@ class SettingsRepository(private val context: Context) {
     suspend fun setSelfTest(v: Boolean) = edit { it[KEY_SELF_TEST] = v }
     suspend fun setActiveModelId(v: String?) = edit { it[KEY_ACTIVE_MODEL] = v ?: "" }
 
+    /** One-time (first start): resolve the device's default home/launcher app
+     *  and add it to the persisted whitelist, so it shows up checked in the
+     *  settings UI. Guarded by a flag so unchecking it later sticks. */
+    suspend fun seedDefaultLauncher() {
+        val home = try {
+            val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME)
+            context.packageManager.resolveActivity(
+                intent,
+                PackageManager.ResolveInfoFlags.of(PackageManager.MATCH_DEFAULT_ONLY.toLong()),
+            )?.activityInfo?.packageName
+                ?.takeIf { it != "android" } // "android" = no default set (resolver)
+        } catch (t: Throwable) {
+            Timber.e(t, "resolving default launcher failed")
+            null
+        }
+        edit { p ->
+            if (p[KEY_LAUNCHER_SEEDED] == true) return@edit
+            if (home != null) {
+                p[KEY_WHITELIST] = (p[KEY_WHITELIST] ?: AppSettings.DEFAULT_WHITELIST) + home
+                Timber.i("whitelisted default launcher: %s", home)
+            }
+            p[KEY_LAUNCHER_SEEDED] = true
+        }
+    }
+
     private suspend fun edit(block: (androidx.datastore.preferences.core.MutablePreferences) -> Unit) {
         context.dataStore.edit(block)
     }
@@ -98,5 +126,6 @@ class SettingsRepository(private val context: Context) {
         val KEY_DEBUG_OVERLAY = booleanPreferencesKey("debug_overlay")
         val KEY_SELF_TEST = booleanPreferencesKey("self_test")
         val KEY_ACTIVE_MODEL = stringPreferencesKey("active_model_id")
+        val KEY_LAUNCHER_SEEDED = booleanPreferencesKey("launcher_seeded")
     }
 }

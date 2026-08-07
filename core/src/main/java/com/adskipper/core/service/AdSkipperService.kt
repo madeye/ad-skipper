@@ -73,6 +73,7 @@ class AdSkipperService : AccessibilityService() {
         yolo = YoloSkipDetector(this).takeIf { it.isReady }
         homePackages = resolveHomePackages() + HOME_SURFACE_PACKAGES
         selfLabels = setOf(applicationInfo.loadLabel(packageManager).toString())
+        scope.launch { settingsRepo.seedDefaultLauncher() }
 
         scope.launch {
             settingsRepo.settings.collect { new ->

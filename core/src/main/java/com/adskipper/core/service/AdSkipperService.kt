@@ -106,7 +106,11 @@ class AdSkipperService : AccessibilityService() {
         pipeline: DetectionPipeline<android.graphics.Bitmap>,
         s: AppSettings,
     ) {
-        if (!processing.compareAndSet(false, true)) return
+        if (!processing.compareAndSet(false, true)) {
+            Timber.d("detection already running, skip %s", pkg)
+            return
+        }
+        Timber.d("detecting in %s", pkg)
         val t0 = android.os.SystemClock.elapsedRealtime()
         try {
             val result = pipeline.detect(

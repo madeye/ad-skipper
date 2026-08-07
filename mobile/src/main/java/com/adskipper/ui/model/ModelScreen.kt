@@ -98,7 +98,7 @@ private fun ModelCard(
                 RadioButton(
                     selected = active,
                     onClick = onActivate,
-                    enabled = downloaded,
+                    enabled = downloaded || model.bundled,
                 )
                 Column {
                     Text(model.displayName, style = MaterialTheme.typography.titleMedium)
@@ -133,7 +133,7 @@ private fun ModelCard(
                     OutlinedButton(onClick = { pickMmproj.launch(arrayOf("*/*")) }) {
                         Text("导入 mmproj GGUF")
                     }
-                } else if (!downloaded && !downloading) {
+                } else if (!downloaded && !downloading && !model.bundled) {
                     Button(onClick = {
                         downloading = true
                         error = null
@@ -154,7 +154,10 @@ private fun ModelCard(
                         }
                     }) { Text("下载") }
                 }
-                if (downloaded && !downloading) {
+                if (model.bundled) {
+                    Text("已内置", color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.align(Alignment.CenterVertically))
+                } else if (downloaded && !downloading) {
                     Text("已下载", color = MaterialTheme.colorScheme.primary,
                         modifier = Modifier.align(Alignment.CenterVertically))
                     if (model.id != ModelCatalog.custom.id) {

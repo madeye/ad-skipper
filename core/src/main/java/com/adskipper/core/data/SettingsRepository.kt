@@ -17,8 +17,8 @@ data class AppSettings(
     val masterEnabled: Boolean = true,
     val layer1Enabled: Boolean = true,
     val layer2Enabled: Boolean = true,
-    // L3 needs a downloaded GGUF model, so it is opt-in.
-    val layer3Enabled: Boolean = false,
+    // L3 runs the bundled SmolVLM2 256M model by default (no download needed).
+    val layer3Enabled: Boolean = true,
     val keywords: Set<String> = DEFAULT_KEYWORDS,
     val whitelist: Set<String> = DEFAULT_WHITELIST,
     val vlmThreads: Int = 4,
@@ -44,7 +44,7 @@ class SettingsRepository(private val context: Context) {
             masterEnabled = p[KEY_MASTER] ?: true,
             layer1Enabled = p[KEY_L1] ?: true,
             layer2Enabled = p[KEY_L2] ?: true,
-            layer3Enabled = p[KEY_L3] ?: false,
+            layer3Enabled = p[KEY_L3] ?: true,
             keywords = p[KEY_KEYWORDS] ?: AppSettings.DEFAULT_KEYWORDS,
             whitelist = p[KEY_WHITELIST] ?: AppSettings.DEFAULT_WHITELIST,
             vlmThreads = p[KEY_VLM_THREADS] ?: 4,

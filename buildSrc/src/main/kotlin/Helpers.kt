@@ -36,8 +36,12 @@ fun Project.setupCore() {
     setupCommon()
     android.apply {
         defaultConfig {
-            versionCode = 1000000
-            versionName = "1.0.0"
+            // Build timestamp as yyyyMMddHH; fits in Play's 2100000000
+            // versionCode ceiling until year 2100.
+            versionCode = java.time.LocalDateTime.now()
+                .format(java.time.format.DateTimeFormatter.ofPattern("yyyyMMddHH"))
+                .toInt()
+            versionName = "1.0"
         }
         buildFeatures.buildConfig = true
     }

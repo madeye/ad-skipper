@@ -1,0 +1,22 @@
+# Gradle / build outputs
+.gradle/
+build/
+**/build/
+local.properties
+
+# IDE
+.idea/
+*.iml
+.kotlin/
+
+# Native
+.cxx/
+
+# OS
+.DS_Store
+
+# llama.cpp vendored source (fetched at build time, see README)
+core/src/main/cpp/llama.cpp/
+
+# Downloaded models
+*.gguf

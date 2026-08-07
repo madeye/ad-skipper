@@ -1,6 +1,6 @@
 package com.adskipper.core.detect
 
-enum class SkipLayer { L1_NODE, L2_OCR, L3_VLM }
+enum class SkipLayer { L1_NODE, L2_OCR, L3_YOLO, L3_VLM }
 
 data class SkipTarget(
     val x: Float,

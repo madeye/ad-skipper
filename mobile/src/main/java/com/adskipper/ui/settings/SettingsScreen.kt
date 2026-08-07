@@ -61,7 +61,7 @@ fun SettingsScreen() {
                 SettingSwitch("L2 本地 OCR（~100ms）", settings.layer2Enabled) {
                     scope.launch { app.settingsRepo.setLayer2Enabled(it) }
                 }
-                SettingSwitch("L3 本地视觉大模型（需下载模型）", settings.layer3Enabled) {
+                SettingSwitch("L3 本地视觉检测（内置检测器 + 可选下载大模型）", settings.layer3Enabled) {
                     scope.launch { app.settingsRepo.setLayer3Enabled(it) }
                 }
             }

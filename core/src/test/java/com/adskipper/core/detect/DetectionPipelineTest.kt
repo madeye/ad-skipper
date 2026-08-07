@@ -18,16 +18,21 @@ class DetectionPipelineTest {
     private var fakeTime = 0L
     private val clock = { fakeTime }
 
+    private var yoloCalled = false
+
     private fun pipeline(
         l1Hit: Pair<Float, Float>? = null,
         l2Hit: Pair<Float, Float>? = null,
         l3Hit: Pair<Float, Float>? = null,
+        yoloHit: Pair<Float, Float>? = null,
     ): DetectionPipeline<Unit> {
-        l1Called = false; l2Called = false; l3Called = false; screenshotCalled = false
+        l1Called = false; l2Called = false; l3Called = false
+        yoloCalled = false; screenshotCalled = false
         return DetectionPipeline(
             l1 = { _, _ -> l1Called = true; fakeTime += 5; l1Hit },
             l2 = { _, _ -> l2Called = true; fakeTime += 100; l2Hit },
             l3 = { _ -> l3Called = true; fakeTime += 1000; l3Hit },
+            l3yolo = { _ -> yoloCalled = true; fakeTime += 50; yoloHit },
             clock = clock,
         )
     }
@@ -68,10 +73,22 @@ class DetectionPipelineTest {
     }
 
     @Test
-    fun `L3 hit when L1 and L2 miss`() = runTest {
+    fun `YOLO hit when L1 and L2 miss, VLM not consulted`() = runTest {
+        val result = pipeline(yoloHit = 900f to 120f).detect(null, ::screenshotAvailable, allOn)
+        assertEquals(SkipLayer.L3_YOLO, result.target?.layer)
+        assertTrue(yoloCalled)
+        assertFalse(l3Called)
+        assertEquals(listOf(SkipLayer.L1_NODE, SkipLayer.L2_OCR, SkipLayer.L3_YOLO),
+            result.timings.map { it.first })
+    }
+
+    @Test
+    fun `L3 VLM hit when everything else misses`() = runTest {
         val result = pipeline(l3Hit = 700f to 80f).detect(null, ::screenshotAvailable, allOn)
         assertEquals(SkipLayer.L3_VLM, result.target?.layer)
-        assertEquals(listOf(SkipLayer.L1_NODE, SkipLayer.L2_OCR, SkipLayer.L3_VLM),
+        assertTrue(yoloCalled)
+        assertEquals(
+            listOf(SkipLayer.L1_NODE, SkipLayer.L2_OCR, SkipLayer.L3_YOLO, SkipLayer.L3_VLM),
             result.timings.map { it.first })
     }
 

@@ -9,6 +9,7 @@ import com.adskipper.core.data.SettingsRepository
 import com.adskipper.core.data.StatsRepository
 import com.adskipper.core.detect.DetectionPipeline
 import com.adskipper.core.detect.SkipTarget
+import com.adskipper.core.detect.YoloSkipDetector
 import com.adskipper.core.model.ModelCatalog
 import com.adskipper.core.model.ModelManager
 import com.adskipper.core.vlm.VlmEngine
@@ -36,12 +37,17 @@ class AdSkipperService : AccessibilityService() {
     private lateinit var modelManager: ModelManager
     private lateinit var engine: VlmEngine
     private lateinit var overlay: DebugOverlay
+    private var yolo: YoloSkipDetector? = null
 
     /** Latest settings snapshot, collected continuously. */
     private val settings = MutableStateFlow(AppSettings())
 
     /** Per-package cooldown to avoid click loops. */
     private val lastAttemptAt = ConcurrentHashMap<String, Long>()
+
+    /** Foreground-session tracking for the L3 splash-window gate. */
+    private val lastEventAt = ConcurrentHashMap<String, Long>()
+    private val sessionStartAt = ConcurrentHashMap<String, Long>()
     private val processing = AtomicBoolean(false)
 
     override fun onServiceConnected() {
@@ -51,6 +57,7 @@ class AdSkipperService : AccessibilityService() {
         modelManager = ModelManager(this)
         engine = VlmEngine()
         overlay = DebugOverlay(this)
+        yolo = YoloSkipDetector(this).takeIf { it.isReady }
 
         scope.launch {
             settingsRepo.settings.collect { new ->
@@ -92,14 +99,29 @@ class AdSkipperService : AccessibilityService() {
         if (pkg in s.whitelist) return
 
         val now = android.os.SystemClock.elapsedRealtime()
+
+        // Splash ads only exist in the first seconds after an app (re)starts.
+        // Outside that window, image-based L3 detectors must not run: unlike
+        // L1/L2 keyword matching they will occasionally see "skip buttons" in
+        // ordinary UI and tap them. Self-test is exempt so the in-app mock ad
+        // can exercise L3 at any time.
+        val prevEvent = lastEventAt.put(pkg, now)
+        if (prevEvent == null || now - prevEvent > SESSION_GAP_MS) {
+            sessionStartAt[pkg] = now
+        }
+        val inSplashWindow = now - (sessionStartAt[pkg] ?: 0L) <= SPLASH_WINDOW_MS
+        val allowL3 = inSplashWindow || (s.selfTest && pkg == packageName)
+        val effective = if (allowL3) s else s.copy(layer3Enabled = false)
+        if (!effective.layer1Enabled && !effective.layer2Enabled && !effective.layer3Enabled) return
+
         val last = lastAttemptAt[pkg] ?: 0L
         if (now - last < ATTEMPT_COOLDOWN_MS) return
         if (processing.get()) return
         lastAttemptAt[pkg] = now
 
-        val model = ModelCatalog.byId(s.activeModelId) ?: ModelCatalog.default
-        val pipeline = DetectionPipeline.create(engine, s, model)
-        scope.launch { runDetection(pkg, pipeline, s) }
+        val model = ModelCatalog.byId(effective.activeModelId) ?: ModelCatalog.default
+        val pipeline = DetectionPipeline.create(engine, effective, model, yolo)
+        scope.launch { runDetection(pkg, pipeline, effective) }
     }
 
     private suspend fun runDetection(
@@ -159,6 +181,12 @@ class AdSkipperService : AccessibilityService() {
 
     companion object {
         private const val ATTEMPT_COOLDOWN_MS = 2000L
+
+        /** L3 image detectors only run this long after an app session starts. */
+        private const val SPLASH_WINDOW_MS = 8000L
+
+        /** Gap without events after which the next event starts a new session. */
+        private const val SESSION_GAP_MS = 20_000L
         private const val TAP_DURATION_MS = 50L
     }
 }

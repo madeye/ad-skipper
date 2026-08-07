@@ -6,7 +6,8 @@
 |---|---|---|---|
 | L1 | 无障碍节点文本匹配（跳过 / Skip / skip_ad…） | <10ms | 原生 UI 的大多数 App |
 | L2 | ML Kit 本地中文 OCR | ~100ms | Flutter / Unity / 游戏等无 UI 树的 App |
-| L3 | 本地 VLM Grounding（llama.cpp + GGUF） | ~2-4s | 倒计时圆环、混淆按钮、纯图片按钮 |
+| L3a | 内置 YOLO11n 跳过按钮检测器（TFLite，~10MB） | ~50-300ms | 倒计时圆环、混淆按钮、纯图片按钮 |
+| L3b | 本地 VLM Grounding（llama.cpp + GGUF，需下载） | ~2-4s | YOLO 未命中的疑难场景兜底 |
 
 命中即短路，L2/L3 只有在前一层未命中时才执行；命中后通过无障碍手势模拟点击。
 
@@ -72,14 +73,15 @@ brew install vulkan-headers spirv-headers shaderc   # glslc 由 shaderc 提供
 ## 使用
 
 1. 打开 App，按首页引导开启无障碍服务（设置 → 无障碍 → 广告跳过）。
-2. 默认 L1/L2/L3 全部开启，但 L3 需要先在「模型」页下载模型（模型太大不便
-   内置 APK）；未下载时 L3 自动跳过，L1/L2 照常工作。
-3. 推荐下载 InternVL3 2B（Q4_K_M + Q8_0 mmproj，约 1.5GB）：2026-08
-   grounding 基准测试（`/Volumes/DATA/workspace/vlm-bench/REPORT.md`）的最优
-   体积/精度折中，896px 输入下 16/20 命中、0 次误点广告 CTA，体积仅为次优
-   模型的一半。备选 Qwen2.5-VL 3B（约 2.8GB，672px 输入下精度相当）。
-   源：ModelScope，失败自动回退 hf-mirror；也支持手动导入 GGUF + mmproj，
-   选中后自动切换。
+2. 默认 L1/L2/L3 全部开启：L3 首先运行内置的 YOLO11n 跳过按钮检测器
+   （在 2026-08 grounding 基准上 19/20 命中、0 次误点 CTA，超过 1.5GB 级
+   VLM，见 `/Volumes/DATA/workspace/vlm-bench/REPORT.md`），无需下载。
+   图像类 L3 检测仅在应用会话开始后的前几秒（开屏广告窗口期）触发，
+   避免在普通界面误点。
+3. 可选兜底：「模型」页可下载 VLM 处理 YOLO 未命中的疑难场景。推荐
+   InternVL3 2B（Q4_K_M + Q8_0 mmproj，约 1.5GB，896px 输入 16/20 命中）；
+   备选 Qwen2.5-VL 3B（约 2.8GB，672px 输入精度相当）。源：ModelScope，
+   失败自动回退 hf-mirror；也支持手动导入 GGUF + mmproj，选中后自动切换。
 4. 「设置」页可配置关键词、白名单、调试悬浮窗（命中时显示层级与坐标）。
 
 构建期会从 ModelScope 下载内置模型（`:core:downloadBundledModel`，缓存于

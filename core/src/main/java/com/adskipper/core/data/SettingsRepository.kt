@@ -35,7 +35,20 @@ data class AppSettings(
 
         /** System UI often contains "Skip" labels (setup wizard etc.) — tapping
          *  those is almost never what the user wants. */
-        val DEFAULT_WHITELIST = setOf("com.android.systemui")
+        /** System surfaces and common launchers: splash ads never appear
+         *  there, and image-based L3 detectors must not tap around on them. */
+        val DEFAULT_WHITELIST = setOf(
+            "com.android.systemui",
+            "com.android.settings",
+            "com.android.launcher3",
+            "com.google.android.apps.nexuslauncher",
+            "com.miui.home",
+            "com.huawei.android.launcher",
+            "com.oppo.launcher",
+            "com.vivo.launcher",
+            "com.sec.android.app.launcher",
+            "net.oneplus.launcher",
+        )
     }
 }
 

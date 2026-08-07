@@ -23,8 +23,17 @@
   256M 无用）：L3 需先在模型页下载 InternVL3-2B，未下载时自动跳过
 - [x] 内置 SmolVLM2 256M (Q8_0, ~266MB) 到 APK assets 并设为默认模型（已
   移除：基准测试证明其无 grounding 能力，0/20）
-- [ ] 训练轻量 YOLO 跳过按钮检测器（~5-10MB，可内置 APK）作为新的默认本地
-  检测层，VLM 降级为可选下载的兜底 — 训练/评估进行中（vlm-bench）
+- [x] 训练轻量 YOLO 跳过按钮检测器并内置 APK（L3a 层），VLM 降级为可选下载
+  兜底（L3b）：YOLO11n 在 2400 张合成开屏广告上训练，基准 19/20 命中、0 次
+  误点 CTA、host 21ms；导出 fp32 TFLite 10.6MB 内置 assets（APK 共 123MB）。
+  训练/导出管线在 `/Volumes/DATA/workspace/vlm-bench/`（gen_yolo_data.py /
+  eval_yolo.py / runs/detect/yolo_runs/）。
+  - 首次真机（模拟器）验证暴露纯合成训练的误报问题：launcher/设置等真实界面
+    16/16 出现 ≥0.35 置信度的假阳性 → 三重修复：(1) 截取真实系统界面做负样本
+    微调（12 屏 ×25 增广 = 300 张，4 屏留作验证）；(2) 置信度阈值 0.35→0.55；
+    (3) AdSkipperService 增加「开屏窗口期」门控 — 图像类 L3 仅在应用会话开始
+    8s 内运行（20s 无事件视为新会话），自测模式豁免；默认白名单扩充常见
+    launcher。
 - [x] Vulkan GPU 后端编译 + L3 端到端验证
   - 模拟器 logcat 确认 Vulkan 后端生效：
     `llama_prepare_model_devices: using device Vulkan0 (Goldfish GFXStream (Apple M4)) - 25005 MiB free`，

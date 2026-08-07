@@ -15,10 +15,11 @@ android {
 
     buildFeatures.compose = true
 
-    // GGUF assets must stay uncompressed so AssetManager.openFd works
+    // GGUF/TFLite assets must stay uncompressed so AssetManager.openFd works
     // (noCompress in a library module does not propagate to packaging).
     aaptOptions {
         noCompress += "gguf"
+        noCompress += "tflite"
     }
 }
 

@@ -43,6 +43,8 @@ dependencies {
     api(libs.androidx.room.ktx)
     api(libs.mlkit.text.recognition.chinese)
     api(libs.tensorflow.lite)
+    api(libs.tensorflow.lite.gpu)
+    api(libs.tensorflow.lite.gpu.api)
     api(libs.okhttp)
     api(libs.timber)
     ksp(libs.androidx.room.compiler)

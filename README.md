@@ -6,7 +6,7 @@
 |---|---|---|---|
 | L1 | 无障碍节点文本匹配（跳过 / Skip / skip_ad…） | <10ms | 原生 UI 的大多数 App |
 | L2 | ML Kit 本地中文 OCR | ~100ms | Flutter / Unity / 游戏等无 UI 树的 App |
-| L3a | 内置 YOLO11n 跳过按钮检测器（TFLite，~10MB） | ~50-300ms | 倒计时圆环、混淆按钮、纯图片按钮 |
+| L3a | 内置 YOLO11n 跳过按钮检测器（TFLite，~10MB，GPU delegate + CPU 回退） | ~20-300ms | 倒计时圆环、混淆按钮、纯图片按钮 |
 | L3b | 本地 VLM Grounding（llama.cpp + GGUF，需下载） | ~2-4s | YOLO 未命中的疑难场景兜底 |
 
 命中即短路，L2/L3 只有在前一层未命中时才执行；命中后通过无障碍手势模拟点击。

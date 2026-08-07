@@ -34,6 +34,14 @@
     (3) AdSkipperService 增加「开屏窗口期」门控 — 图像类 L3 仅在应用会话开始
     8s 内运行（20s 无事件视为新会话），自测模式豁免；默认白名单扩充常见
     launcher。
+  - GPU 加速：YoloSkipDetector 优先用 TFLite GPU delegate（`tensorflow-lite-gpu`
+    +`-gpu-api`），warmup 推理校验，失败自动回退 CPU/XNNPACK；解释器创建与推理
+    固定在单线程（GPU delegate 的 EGL context 绑定创建线程）。真机
+    （Adreno/Mali，ES 3.1+/OpenCL）走 GPU；`CompatibilityList` 拒绝的设备可用
+    `setprop debug.adskipper.force_gpu 1` 强制尝试（仅调试）。模拟器验证：GPU
+    delegate 成功创建并被尝试，但 Goldfish GL 仅暴露 ES 3.0（delegate 需 ES 3.1
+    compute shader / OpenCL），apply 失败 → 干净回退 CPU 命中（未崩溃）。真机
+    GPU 实测仍待补。
 - [x] Vulkan GPU 后端编译 + L3 端到端验证
   - 模拟器 logcat 确认 Vulkan 后端生效：
     `llama_prepare_model_devices: using device Vulkan0 (Goldfish GFXStream (Apple M4)) - 25005 MiB free`，

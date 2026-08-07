@@ -6,7 +6,7 @@
 |---|---|---|---|
 | L1 | 无障碍节点文本匹配（跳过 / Skip / skip_ad…） | <10ms | 原生 UI 的大多数 App |
 | L2 | ML Kit 本地中文 OCR | ~100ms | Flutter / Unity / 游戏等无 UI 树的 App |
-| L3a | 内置 YOLO11n 跳过按钮检测器（TFLite，~10MB，GPU delegate + CPU 回退） | ~20-300ms | 倒计时圆环、混淆按钮、纯图片按钮 |
+| L3a | 内置 YOLO11n 跳过按钮检测器（ggml Vulkan 后端 + CPU 回退，~10MB） | ~20-300ms | 倒计时圆环、混淆按钮、纯图片按钮 |
 | L3b | 本地 VLM Grounding（llama.cpp + GGUF，需下载） | ~2-4s | YOLO 未命中的疑难场景兜底 |
 
 命中即短路，L2/L3 只有在前一层未命中时才执行；命中后通过无障碍手势模拟点击。
@@ -74,8 +74,11 @@ brew install vulkan-headers spirv-headers shaderc   # glslc 由 shaderc 提供
 
 1. 打开 App，按首页引导开启无障碍服务（设置 → 无障碍 → 广告跳过）。
 2. 默认 L1/L2/L3 全部开启：L3 首先运行内置的 YOLO11n 跳过按钮检测器
-   （在 2026-08 grounding 基准上 19/20 命中、0 次误点 CTA，超过 1.5GB 级
+   （在 2026-08 grounding 基准上 20/20 命中、0 次误点 CTA，超过 1.5GB 级
    VLM，见 `/Volumes/DATA/workspace/vlm-bench/REPORT.md`），无需下载。
+   检测器跑在 ggml Vulkan 后端（与 L3b VLM 同一后端；无 Vulkan 时回退 CPU），
+   只依赖 Vulkan 1.0，不需要 TFLite/OpenGL ES 3.1。转换与数值验证管线在
+   `vlm-bench/ggml-yolo/`（ONNX→GGUF+op-program，逐节点对齐 ONNX Runtime）。
    图像类 L3 检测仅在应用会话开始后的前几秒（开屏广告窗口期）触发，
    避免在普通界面误点。
 3. 可选兜底：「模型」页可下载 VLM 处理 YOLO 未命中的疑难场景。推荐

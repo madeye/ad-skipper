@@ -34,14 +34,26 @@
     (3) AdSkipperService 增加「开屏窗口期」门控 — 图像类 L3 仅在应用会话开始
     8s 内运行（20s 无事件视为新会话），自测模式豁免；默认白名单扩充常见
     launcher。
-  - GPU 加速：YoloSkipDetector 优先用 TFLite GPU delegate（`tensorflow-lite-gpu`
-    +`-gpu-api`），warmup 推理校验，失败自动回退 CPU/XNNPACK；解释器创建与推理
-    固定在单线程（GPU delegate 的 EGL context 绑定创建线程）。真机
-    （Adreno/Mali，ES 3.1+/OpenCL）走 GPU；`CompatibilityList` 拒绝的设备可用
-    `setprop debug.adskipper.force_gpu 1` 强制尝试（仅调试）。模拟器验证：GPU
-    delegate 成功创建并被尝试，但 Goldfish GL 仅暴露 ES 3.0（delegate 需 ES 3.1
-    compute shader / OpenCL），apply 失败 → 干净回退 CPU 命中（未崩溃）。真机
-    GPU 实测仍待补。
+  - GPU 加速（改用 ggml Vulkan，弃用 TFLite）：TFLite GPU delegate 依赖
+    OpenGL ES 3.1，覆盖面差；改为把 YOLO11n 直接跑在仓库已有的 ggml Vulkan
+    后端上（与 L3b VLM 同一后端），只需 Vulkan 1.0。实现：
+    - `vlm-bench/ggml-yolo/convert.py` 把 YOLO11n ONNX 转成 `yolo.gguf`（权重，
+      ggml layout）+ `yolo.prog`（319 节点 op-program，具体属性）+ ORT 逐节点
+      参考；`run_host.cpp`（链接 host ggml，CPU）逐节点对齐 ORT，output0
+      relmax=4.7e-4 PASS（含 C2PSA attention 与 DFL 解码）。
+    - `core/src/main/cpp/yolo_jni.cpp`：ggml-backend 载入 gguf+prog，
+      GPU(Vulkan)→CPU 自动回退，构图一次、每帧 set 输入/compute/取 output0；
+      `YoloNative.kt`/`YoloSkipDetector.kt` 首启把 gguf/prog 解压到 filesDir，
+      解码沿用原 [1,5,8400] 逻辑（布局一致）。CMake 新增 `yolo_jni` 目标（链接
+      ggml）。已移除 TFLite 依赖与 `skip_detector.tflite`、force_gpu 调试开关。
+    - 关键转换点：ggml ne = ONNX dims 反序（conv 权重 [OC,IC,KH,KW] 直接当
+      [KW,KH,IC,OC]）；ggml_permute 轴映射需 `axis_i = r-1-argwhere(perm==r-1-i)`；
+      depthwise conv 走 `ggml_conv_2d_dw`（内部强制 F16 im2col → 核 cast F16）；
+      两处 softmax 均为 ne[0]。
+    - 构建通过，APK 116MB（含 libggml-vulkan.so 53MB + libyolo_jni.so + 10MB
+      gguf），已装到真机（小米 14 Ultra / Adreno 750 / Vulkan 1.3）。真机
+      GPU 端到端确认待用户手动开启无障碍服务（HyperOS 禁止 adb 写
+      secure settings，无法脚本开启）。
 - [x] Vulkan GPU 后端编译 + L3 端到端验证
   - 模拟器 logcat 确认 Vulkan 后端生效：
     `llama_prepare_model_devices: using device Vulkan0 (Goldfish GFXStream (Apple M4)) - 25005 MiB free`，

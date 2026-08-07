@@ -57,16 +57,7 @@ class AdSkipperService : AccessibilityService() {
         modelManager = ModelManager(this)
         engine = VlmEngine()
         overlay = DebugOverlay(this)
-        // `setprop debug.adskipper.force_gpu 1` forces a GPU-delegate attempt
-        // even where CompatibilityList rejects it (e.g. emulators), for
-        // validating the GPU path. No effect on normal devices.
-        val forceGpu = runCatching {
-            @Suppress("PrivateApi")
-            Class.forName("android.os.SystemProperties")
-                .getMethod("get", String::class.java)
-                .invoke(null, "debug.adskipper.force_gpu") == "1"
-        }.getOrDefault(false)
-        yolo = YoloSkipDetector(this, forceGpuAttempt = forceGpu).takeIf { it.isReady }
+        yolo = YoloSkipDetector(this).takeIf { it.isReady }
 
         scope.launch {
             settingsRepo.settings.collect { new ->

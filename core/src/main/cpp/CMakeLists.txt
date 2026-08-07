@@ -132,3 +132,11 @@ target_link_options(vlm_jni PRIVATE "-Wl,-z,max-page-size=16384")
 
 find_library(log_lib log)
 target_link_libraries(vlm_jni PRIVATE mtmd llama ${log_lib} jnigraphics android)
+
+# Native YOLO detector: runs a converted YOLO11n op-program on the ggml
+# Vulkan backend (CPU fallback). Links ggml directly (no llama/mtmd needed).
+add_library(yolo_jni SHARED yolo_jni.cpp)
+target_include_directories(yolo_jni PRIVATE ${LLAMA_SRC}/ggml/include)
+target_compile_features(yolo_jni PRIVATE cxx_std_17)
+target_link_options(yolo_jni PRIVATE "-Wl,-z,max-page-size=16384")
+target_link_libraries(yolo_jni PRIVATE ggml ${log_lib} jnigraphics android)

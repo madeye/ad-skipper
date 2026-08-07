@@ -20,3 +20,6 @@ core/src/main/cpp/llama.cpp/
 
 # Downloaded models
 *.gguf
+
+# bundled YOLO detector (small, ships in APK)
+!core/src/main/assets/yolo.gguf

@@ -5,57 +5,47 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Rect
-import org.tensorflow.lite.Interpreter
-import org.tensorflow.lite.gpu.CompatibilityList
-import org.tensorflow.lite.gpu.GpuDelegate
 import timber.log.Timber
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
-import java.nio.MappedByteBuffer
-import java.nio.channels.FileChannel
+import java.io.File
 import java.util.concurrent.Callable
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
 /**
- * L3 fast path: bundled YOLO11n skip-button detector (~10MB TFLite).
- * Trained on synthetic splash ads + real UI negatives (vlm-bench 2026-08);
- * scores 20/20 on the grounding benchmark vs 16/20 for the 1.5GB
- * InternVL3-2B VLM, with zero false positives on real app screens.
+ * L3 fast path: bundled YOLO11n skip-button detector running on the ggml
+ * Vulkan backend (CPU fallback), the same backend the L3 VLM uses.
  *
- * Runs on the TFLite GPU delegate when the device supports it, falling back
- * to CPU/XNNPACK. All interpreter work is confined to a single thread: the
- * GPU delegate binds its EGL context to the thread that created it, so
- * creation and inference must happen on the same thread.
+ * The model is a converted YOLO11n op-program (assets/yolo.gguf + yolo.prog,
+ * produced and numerically validated against ONNX Runtime by
+ * vlm-bench/ggml-yolo/). It scores 20/20 on the grounding benchmark with zero
+ * false positives on real app screens, and — unlike the previous TFLite GPU
+ * delegate — needs only Vulkan 1.0, not OpenGL ES 3.1.
+ *
+ * All native work is confined to a single thread so the Vulkan device/queue
+ * is used consistently.
  */
-class YoloSkipDetector(
-    private val context: Context,
-    /** Attempt the GPU delegate even when CompatibilityList rejects the device.
-     *  Off by default: an unsupported driver may abort natively rather than
-     *  throw. Useful for validating the GPU path on emulators / new hardware. */
-    private val forceGpuAttempt: Boolean = false,
-) {
+class YoloSkipDetector(private val context: Context) {
 
     private val executor = Executors.newSingleThreadExecutor { r -> Thread(r, "yolo-skip") }
-
-    private var interpreter: Interpreter? = null
-    private var gpuDelegate: GpuDelegate? = null
-    private var initTried = false
 
     @Volatile
     var backend: String = "uninitialized"
         private set
 
-    /** Cheap constructor-time check; the interpreter is built lazily on the
-     *  executor thread at first use. */
+    private var initTried = false
+    private var initOk = false
+
+    /** Asset presence is the readiness signal; the native engine is built
+     *  lazily on the executor thread at first use. */
     val isReady: Boolean = try {
-        context.assets.openFd(ASSET).use { true }
+        context.assets.openFd(GGUF_ASSET).use { true }
     } catch (t: Throwable) {
-        Timber.e(t, "YOLO skip detector asset missing")
-        false
+        // openFd throws for compressed assets; fall back to a stream probe.
+        try { context.assets.open(GGUF_ASSET).use { true } } catch (e: Throwable) {
+            Timber.e(e, "YOLO assets missing"); false
+        }
     }
 
-    /** Best detection above [CONF_THRESHOLD] mapped back to bitmap pixels. */
     fun findSkipButton(bitmap: Bitmap): Rect? {
         if (!isReady) return null
         return try {
@@ -66,165 +56,100 @@ class YoloSkipDetector(
         }
     }
 
-    // ---- everything below runs on the executor thread ----
+    // ---- executor thread only ----
 
     private fun detect(bitmap: Bitmap): Rect? {
-        val itp = interpreterOrNull() ?: return null
+        if (!ensureInit()) return null
         val scale = IN_SIZE.toFloat() / maxOf(bitmap.width, bitmap.height)
         val w = (bitmap.width * scale).toInt().coerceAtLeast(1)
         val h = (bitmap.height * scale).toInt().coerceAtLeast(1)
         val padX = (IN_SIZE - w) / 2f
         val padY = (IN_SIZE - h) / 2f
 
-        val input = letterbox(bitmap, w, h, padX.toInt(), padY.toInt())
-        val outShape = itp.getOutputTensor(0).shape() // [1,5,N] or [1,N,5]
-        val chFirst = outShape[1] < outShape[2]
-        val n = if (chFirst) outShape[2] else outShape[1]
-        val out = Array(1) {
-            if (chFirst) Array(5) { FloatArray(n) } else Array(n) { FloatArray(5) }
+        val canvasBmp = Bitmap.createBitmap(IN_SIZE, IN_SIZE, Bitmap.Config.ARGB_8888)
+        Canvas(canvasBmp).apply {
+            drawColor(Color.rgb(114, 114, 114))
+            drawBitmap(Bitmap.createScaledBitmap(bitmap, w, h, true), padX, padY, null)
         }
-        itp.run(input, out)
 
+        val out = YoloNative.nativeInfer(canvasBmp) ?: return null
+        // out layout: index = channel*ANCHORS + anchor; channels 0..3 = xywh
+        // (640px letterbox coords), channel 4 = class score (already sigmoid).
         var best = -1f
-        var bx = 0f; var by = 0f; var bw = 0f; var bh = 0f
-        var maxCoord = 0f
-        for (i in 0 until n) {
-            val conf = if (chFirst) out[0][4][i] else out[0][i][4]
-            if (conf <= best) continue
-            best = conf
-            bx = if (chFirst) out[0][0][i] else out[0][i][0]
-            by = if (chFirst) out[0][1][i] else out[0][i][1]
-            bw = if (chFirst) out[0][2][i] else out[0][i][2]
-            bh = if (chFirst) out[0][3][i] else out[0][i][3]
-            maxCoord = maxOf(maxCoord, bx, by)
+        var bi = -1
+        val scoreBase = 4 * ANCHORS
+        for (a in 0 until ANCHORS) {
+            val s = out[scoreBase + a]
+            if (s > best) { best = s; bi = a }
         }
-        if (best < CONF_THRESHOLD) return null
-        // Some exports emit coords normalized to 0-1, others in input pixels.
-        val toPx = if (maxCoord <= 2f) IN_SIZE.toFloat() else 1f
-        val cx = (bx * toPx - padX) / scale
-        val cy = (by * toPx - padY) / scale
-        val halfW = bw * toPx / scale / 2f
-        val halfH = bh * toPx / scale / 2f
+        if (best < CONF_THRESHOLD || bi < 0) return null
+
+        val cx = (out[bi] - padX) / scale
+        val cy = (out[ANCHORS + bi] - padY) / scale
+        val bw = out[2 * ANCHORS + bi] / scale
+        val bh = out[3 * ANCHORS + bi] / scale
         Timber.d("YOLO hit conf=%.2f at (%.0f, %.0f) [%s]", best, cx, cy, backend)
         return Rect(
-            (cx - halfW).toInt().coerceIn(0, bitmap.width),
-            (cy - halfH).toInt().coerceIn(0, bitmap.height),
-            (cx + halfW).toInt().coerceIn(0, bitmap.width),
-            (cy + halfH).toInt().coerceIn(0, bitmap.height),
+            (cx - bw / 2f).toInt().coerceIn(0, bitmap.width),
+            (cy - bh / 2f).toInt().coerceIn(0, bitmap.height),
+            (cx + bw / 2f).toInt().coerceIn(0, bitmap.width),
+            (cy + bh / 2f).toInt().coerceIn(0, bitmap.height),
         )
     }
 
-    private fun interpreterOrNull(): Interpreter? {
-        if (initTried) return interpreter
+    private fun ensureInit(): Boolean {
+        if (initTried) return initOk
         initTried = true
-
-        val model = mapModel() ?: run { backend = "error"; return null }
-        // GPU first. CompatibilityList is a conservative allowlist and only
-        // supplies tuned options; we attempt the delegate whenever it says yes
-        // OR when force-enabled, then *validate* by a warmup inference — the
-        // delegate can fail at creation or at first run (shader compilation),
-        // and either way we fall back to CPU. Attempting on a device the list
-        // rejects is opt-in (forceGpuAttempt) because a truly unsupported
-        // driver can abort natively instead of throwing.
-        val compat = try {
-            CompatibilityList()
+        val gguf = extractAsset(GGUF_ASSET)
+        val prog = extractAsset(PROG_ASSET)
+        if (gguf == null || prog == null) { backend = "error"; return false }
+        backend = try {
+            YoloNative.nativeInit(gguf.absolutePath, prog.absolutePath)
         } catch (t: Throwable) {
-            Timber.w(t, "GPU compatibility list unavailable")
-            null
+            Timber.e(t, "nativeInit crashed"); "error"
         }
-        val supported = compat?.isDelegateSupportedOnThisDevice == true
-        if (supported || forceGpuAttempt) {
-            try {
-                val options = if (supported && compat != null) {
-                    compat.bestOptionsForThisDevice
-                } else {
-                    GpuDelegate.Options()
-                }
-                val delegate = GpuDelegate(options)
-                val itp = Interpreter(model, Interpreter.Options().addDelegate(delegate))
-                warmup(itp)
-                gpuDelegate = delegate
-                interpreter = itp
-                backend = "gpu"
-                Timber.i("YOLO running on GPU delegate (supported=%b)", supported)
-                return itp
-            } catch (t: Throwable) {
-                Timber.w(t, "GPU delegate failed, falling back to CPU")
-                gpuDelegate?.close()
-                gpuDelegate = null
+        initOk = backend != "error"
+        Timber.i("YOLO ggml engine: %s", backend)
+        return initOk
+    }
+
+    /** Copy an asset into filesDir (skip if already present with same size). */
+    private fun extractAsset(name: String): File? = try {
+        val dir = File(context.filesDir, "yolo").apply { mkdirs() }
+        val dest = File(dir, name)
+        val size = context.assets.openFd(name).use { it.length }
+        if (!dest.exists() || dest.length() != size) {
+            context.assets.open(name).use { input ->
+                dest.outputStream().use { input.copyTo(it) }
             }
-        } else {
-            Timber.i("GPU delegate not supported on this device")
         }
-        return try {
-            val itp = Interpreter(model, Interpreter.Options().setNumThreads(THREADS))
-            warmup(itp)
-            interpreter = itp
-            backend = "cpu"
-            Timber.i("YOLO running on CPU (%d threads)", THREADS)
-            itp
-        } catch (t: Throwable) {
-            Timber.e(t, "YOLO interpreter init failed")
-            backend = "error"
-            null
-        }
-    }
-
-    private fun warmup(itp: Interpreter) {
-        val input = ByteBuffer.allocateDirect(4 * IN_SIZE * IN_SIZE * 3)
-            .order(ByteOrder.nativeOrder())
-        val shape = itp.getOutputTensor(0).shape()
-        val out = Array(1) { Array(shape[1]) { FloatArray(shape[2]) } }
-        itp.run(input, out)
-    }
-
-    private fun mapModel(): MappedByteBuffer? = try {
-        context.assets.openFd(ASSET).use { fd ->
-            fd.createInputStream().channel
-                .map(FileChannel.MapMode.READ_ONLY, fd.startOffset, fd.declaredLength)
-        }
+        dest
     } catch (t: Throwable) {
-        Timber.e(t, "cannot map %s", ASSET)
-        null
-    }
-
-    /** Center-letterboxed RGB float input, /255, gray padding (ultralytics). */
-    private fun letterbox(src: Bitmap, w: Int, h: Int, padX: Int, padY: Int): ByteBuffer {
-        val canvasBmp = Bitmap.createBitmap(IN_SIZE, IN_SIZE, Bitmap.Config.ARGB_8888)
-        val canvas = Canvas(canvasBmp)
-        canvas.drawColor(Color.rgb(114, 114, 114))
-        val scaled = Bitmap.createScaledBitmap(src, w, h, true)
-        canvas.drawBitmap(scaled, padX.toFloat(), padY.toFloat(), null)
-
-        val pixels = IntArray(IN_SIZE * IN_SIZE)
-        canvasBmp.getPixels(pixels, 0, IN_SIZE, 0, 0, IN_SIZE, IN_SIZE)
-        val buf = ByteBuffer.allocateDirect(4 * IN_SIZE * IN_SIZE * 3)
-            .order(ByteOrder.nativeOrder())
-        for (p in pixels) {
-            buf.putFloat(((p shr 16) and 0xFF) / 255f)
-            buf.putFloat(((p shr 8) and 0xFF) / 255f)
-            buf.putFloat((p and 0xFF) / 255f)
+        // Compressed asset: openFd fails; copy without the size check.
+        try {
+            val dir = File(context.filesDir, "yolo").apply { mkdirs() }
+            val dest = File(dir, name)
+            if (!dest.exists()) {
+                context.assets.open(name).use { input ->
+                    dest.outputStream().use { input.copyTo(it) }
+                }
+            }
+            dest
+        } catch (e: Throwable) {
+            Timber.e(e, "extract %s failed", name); null
         }
-        buf.rewind()
-        return buf
     }
 
     fun close() {
-        executor.execute {
-            interpreter?.close()
-            interpreter = null
-            gpuDelegate?.close()
-            gpuDelegate = null
-        }
+        executor.execute { runCatching { YoloNative.nativeRelease() } }
         executor.shutdown()
     }
 
     private companion object {
-        const val ASSET = "skip_detector.tflite"
+        const val GGUF_ASSET = "yolo.gguf"
+        const val PROG_ASSET = "yolo.prog"
         const val IN_SIZE = 640
-        const val THREADS = 4
-        // Real-world screens (launcher icons, dark chips) can score ~0.4-0.5;
-        // true skip buttons score 0.9+. Keep well above the noise floor.
+        const val ANCHORS = 8400
         const val CONF_THRESHOLD = 0.55f
     }
 }

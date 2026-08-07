@@ -63,6 +63,10 @@ class AdSkipperService : AccessibilityService() {
      *  so L1/L2 must never treat it as a skip button. */
     private var selfLabels: Set<String> = emptySet()
 
+    /** True while the mock-ad test page is the app's foreground window. */
+    @Volatile
+    private var selfTestAdVisible = false
+
     override fun onServiceConnected() {
         Timber.i("AdSkipperService connected")
         startKeepaliveForeground()
@@ -150,7 +154,16 @@ class AdSkipperService : AccessibilityService() {
         val s = settings.value
         if (!s.masterEnabled) return
         if (!s.layer1Enabled && !s.layer2Enabled && !s.layer3Enabled) return
-        if (pkg == packageName && !s.selfTest) return
+        if (pkg == packageName) {
+            // Self-test only exempts the mock-ad page, not the whole app:
+            // our own UI is full of keyword-bearing text（自动跳过广告、
+            // 白名单（不跳过的应用）…）that L1/L2 would happily tap.
+            if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+                selfTestAdVisible =
+                    event.className?.toString()?.endsWith("TestAdActivity") == true
+            }
+            if (!s.selfTest || !selfTestAdVisible) return
+        }
         if (pkg in s.whitelist || pkg in homePackages) return
 
         val now = android.os.SystemClock.elapsedRealtime()

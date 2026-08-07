@@ -2,6 +2,8 @@ package com.adskipper.core.service
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
+import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Path
 import android.view.accessibility.AccessibilityEvent
 import com.adskipper.core.data.AppSettings
@@ -50,6 +52,13 @@ class AdSkipperService : AccessibilityService() {
     private val sessionStartAt = ConcurrentHashMap<String, Long>()
     private val processing = AtomicBoolean(false)
 
+    /** Home/launcher apps resolved from the device, always skipped: splash ads
+     *  never appear there, and this app's own icon sits on the home screen —
+     *  an image L3 false positive would tap it. The static DEFAULT_WHITELIST
+     *  can't cover every OEM launcher, and users with an old persisted
+     *  whitelist never receive new defaults. */
+    private var homePackages: Set<String> = emptySet()
+
     override fun onServiceConnected() {
         Timber.i("AdSkipperService connected")
         settingsRepo = SettingsRepository(this)
@@ -58,6 +67,7 @@ class AdSkipperService : AccessibilityService() {
         engine = VlmEngine()
         overlay = DebugOverlay(this)
         yolo = YoloSkipDetector(this).takeIf { it.isReady }
+        homePackages = resolveHomePackages()
 
         scope.launch {
             settingsRepo.settings.collect { new ->
@@ -72,6 +82,18 @@ class AdSkipperService : AccessibilityService() {
                 }
             }
         }
+    }
+
+    private fun resolveHomePackages(): Set<String> = try {
+        val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME)
+        packageManager.queryIntentActivities(
+            intent,
+            PackageManager.ResolveInfoFlags.of(PackageManager.MATCH_ALL.toLong()),
+        ).mapTo(mutableSetOf()) { it.activityInfo.packageName }
+            .also { Timber.i("home packages: %s", it) }
+    } catch (t: Throwable) {
+        Timber.e(t, "resolving home packages failed")
+        emptySet()
     }
 
     private suspend fun loadActiveModel(s: AppSettings) {
@@ -96,7 +118,7 @@ class AdSkipperService : AccessibilityService() {
         if (!s.masterEnabled) return
         if (!s.layer1Enabled && !s.layer2Enabled && !s.layer3Enabled) return
         if (pkg == packageName && !s.selfTest) return
-        if (pkg in s.whitelist) return
+        if (pkg in s.whitelist || pkg in homePackages) return
 
         val now = android.os.SystemClock.elapsedRealtime()
 

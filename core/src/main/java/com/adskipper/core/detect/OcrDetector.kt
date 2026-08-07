@@ -18,7 +18,11 @@ class OcrDetector {
     private val recognizer =
         TextRecognition.getClient(ChineseTextRecognizerOptions.Builder().build())
 
-    suspend fun findSkipButton(bitmap: Bitmap, keywords: Collection<String>): Point? =
+    suspend fun findSkipButton(
+        bitmap: Bitmap,
+        keywords: Collection<String>,
+        excluded: Collection<String> = emptySet(),
+    ): Point? =
         suspendCancellableCoroutine { cont ->
             recognizer.process(InputImage.fromBitmap(bitmap, 0))
                 .addOnSuccessListener { result ->
@@ -26,7 +30,7 @@ class OcrDetector {
                     outer@ for (block in result.textBlocks) {
                         for (line in block.lines) {
                             if (!KeywordMatcher.isPlausibleButtonText(line.text)) continue
-                            if (KeywordMatcher.matches(line.text, keywords) == null) continue
+                            if (KeywordMatcher.matches(line.text, keywords, excluded) == null) continue
                             val box = line.boundingBox ?: continue
                             point = Point(box.centerX(), box.centerY())
                             break@outer

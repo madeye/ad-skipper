@@ -59,6 +59,10 @@ class AdSkipperService : AccessibilityService() {
      *  whitelist never receive new defaults. */
     private var homePackages: Set<String> = emptySet()
 
+    /** This app's launcher label ("广告跳过") — it contains the keyword "跳过",
+     *  so L1/L2 must never treat it as a skip button. */
+    private var selfLabels: Set<String> = emptySet()
+
     override fun onServiceConnected() {
         Timber.i("AdSkipperService connected")
         settingsRepo = SettingsRepository(this)
@@ -67,7 +71,8 @@ class AdSkipperService : AccessibilityService() {
         engine = VlmEngine()
         overlay = DebugOverlay(this)
         yolo = YoloSkipDetector(this).takeIf { it.isReady }
-        homePackages = resolveHomePackages()
+        homePackages = resolveHomePackages() + HOME_SURFACE_PACKAGES
+        selfLabels = setOf(applicationInfo.loadLabel(packageManager).toString())
 
         scope.launch {
             settingsRepo.settings.collect { new ->
@@ -142,7 +147,7 @@ class AdSkipperService : AccessibilityService() {
         lastAttemptAt[pkg] = now
 
         val model = ModelCatalog.byId(effective.activeModelId) ?: ModelCatalog.default
-        val pipeline = DetectionPipeline.create(engine, effective, model, yolo)
+        val pipeline = DetectionPipeline.create(engine, effective, model, yolo, selfLabels)
         scope.launch { runDetection(pkg, pipeline, effective) }
     }
 
@@ -210,5 +215,14 @@ class AdSkipperService : AccessibilityService() {
         /** Gap without events after which the next event starts a new session. */
         private const val SESSION_GAP_MS = 20_000L
         private const val TAP_DURATION_MS = 50L
+
+        /** Home-screen companion surfaces that are separate packages from the
+         *  launcher (search overlay, minus-one screen). They list installed
+         *  apps, never show splash ads, and must not be tapped. */
+        private val HOME_SURFACE_PACKAGES = setOf(
+            "com.android.quicksearchbox",             // MIUI/AOSP home search
+            "com.google.android.googlequicksearchbox", // Google app / Pixel search
+            "com.miui.personalassistant",             // MIUI minus-one screen
+        )
     }
 }

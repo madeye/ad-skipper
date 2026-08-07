@@ -81,16 +81,17 @@ class DetectionPipeline<I>(
             settings: AppSettings,
             model: ModelInfo,
             yolo: YoloSkipDetector?,
+            selfLabels: Collection<String> = emptySet(),
         ): DetectionPipeline<Bitmap> {
             val ocr = OcrDetector()
             val vlm = VlmDetector(engine, model)
             return DetectionPipeline<Bitmap>(
                 l1 = { root, keywords ->
-                    NodeMatcher.findSkipNode(root, keywords)
+                    NodeMatcher.findSkipNode(root, keywords, selfLabels)
                         ?.let { it.exactCenterX() to it.exactCenterY() }
                 },
                 l2 = { bitmap, keywords ->
-                    ocr.findSkipButton(bitmap, keywords)
+                    ocr.findSkipButton(bitmap, keywords, selfLabels)
                         ?.let { it.x.toFloat() to it.y.toFloat() }
                 },
                 l3yolo = { bitmap ->

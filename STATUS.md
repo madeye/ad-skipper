@@ -4,7 +4,24 @@
 
 ## 当前任务状态（TODO）
 
-- [x] 内置 SmolVLM2 256M (Q8_0, ~266MB) 到 APK assets 并设为默认模型
+- [x] VLM 模型选型基准测试（2026-08-07，harness 在 `/Volumes/DATA/workspace/vlm-bench/`，
+  详见其 REPORT.md）：20 张合成开屏广告 + GT 框，8 个候选 GGUF 模型 × 4 种输入
+  分辨率 × 多种坐标约定。结论：
+  - **旧配置（448px + yxyx 归一化 prompt/parser）所有模型 0/20 命中**，三个叠加
+    原因：448px 太小（跳过按钮仅 ~30×15px）；模型实际回答 xyxy（InternVL/MiniCPM
+    为 0-1000 归一化，Qwen2.5-VL 为输入图绝对像素）；BboxParser 的数字正则会把
+    JSON key `bbox_2d` 里的 2 当成第一个坐标。
+  - **最优折中：InternVL3-2B Q4_K_M + Q8_0 mmproj（1.46GB）@896px：16/20 命中、
+    0 次误点 CTA**。Qwen2.5-VL-3B @672px 也是 16/20 但体积 2.8GB 且有 1 次误点
+    CTA；MiniCPM-V 2.6（5.7GB，8/20）与 Qwen2-VL-2B（2.3GB，≤5/20）被碾压；
+    ≤1B 的模型（SmolVLM2 256M/500M、LFM2-VL、InternVL3-1B）全部 0-3/20，无
+    grounding 能力。Qwen 的 Q8_0 mmproj 与 f16 精度一致（省 0.5GB）。
+- [x] 按基准结论重构 L3（feature/internvl3-2b-default 分支）：内置模型换成
+  InternVL3-2B（APK 增至 ~1.5GB）、prompt 改为 JSON bbox_2d xyxy、BboxParser
+  重写（方括号组提取 + 按模型 CoordSpace 解析）、MAX_DIM 按模型（896/672）、
+  vlmTimeoutMs 默认 4s→8s、目录仅保留 InternVL3-2B / Qwen2.5-VL / 自定义
+- [x] 内置 SmolVLM2 256M (Q8_0, ~266MB) 到 APK assets 并设为默认模型（已被
+  InternVL3-2B 替代，见上）
 - [x] Vulkan GPU 后端编译 + L3 端到端验证
   - 模拟器 logcat 确认 Vulkan 后端生效：
     `llama_prepare_model_devices: using device Vulkan0 (Goldfish GFXStream (Apple M4)) - 25005 MiB free`，
@@ -74,7 +91,11 @@
 
 ## 待验证 / 风险
 
-- SmolVLM2 256M grounding 能力有限，复杂按钮可能定位不准（L3 是兜底层，可接受）。
+- InternVL3-2B @896px 的真机延迟未实测（host 基准含加载约 3s；896px 的图像
+  token 是 448px 的 4 倍）。若旗舰机也压不进 ~2s，可考虑 Qwen2.5-VL-3B @672px
+  （精度同为 16/20，但要多下 1.3GB 且基准中有 1 次误点 CTA）。
+- APK 含内置模型约 1.5GB，Play 商店 AAB 限制下无法直接上架，需改用
+  Play Asset Delivery 或首启下载（当前按侧载分发考虑）。
 - llama.cpp pin 在 master `a1f96d4`（2026-08-06 浅克隆）；升级需重验 mtmd API。
 - 目前仅在模拟器（Goldfish GFXStream / Apple M4 host）验证过 Vulkan 路径，真机
   GPU（各厂商驱动）尚未实测，需注意驱动差异导致的扩展支持不一致。

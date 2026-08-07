@@ -13,10 +13,12 @@ plugins {
 
 setupCore()
 
-// Bundled VLM model (SmolVLM2 256M Q8_0, ~266MB): downloaded from ModelScope
-// at build time, cached under build/, and packaged as APK assets so L3 works
-// out of the box. Kept out of git; assets are declared noCompress so
-// AssetManager.openFd works (required for zero-copy mmap by llama.cpp).
+// Bundled VLM model (InternVL3-2B Q4_K_M + Q8_0 mmproj, ~1.4GB): downloaded
+// from ModelScope at build time, cached under build/, and packaged as APK
+// assets so L3 works out of the box. Chosen by the 2026-08 vlm-bench grounding
+// benchmark (16/20 hits @896px input, smallest capable model). Kept out of
+// git; assets are declared noCompress so AssetManager.openFd works (required
+// for zero-copy mmap by llama.cpp).
 abstract class DownloadBundledModel : DefaultTask() {
     @get:OutputDirectory
     abstract val outputDir: DirectoryProperty
@@ -24,13 +26,16 @@ abstract class DownloadBundledModel : DefaultTask() {
     @TaskAction
     fun run() {
         val base =
-            "https://modelscope.cn/models/ggml-org/SmolVLM2-256M-Video-Instruct-GGUF/resolve/master"
+            "https://modelscope.cn/models/ggml-org/InternVL3-2B-Instruct-GGUF/resolve/master"
         val files = mapOf(
-            "SmolVLM2-256M-Video-Instruct-Q8_0.gguf" to 175056352L,
-            "mmproj-SmolVLM2-256M-Video-Instruct-Q8_0.gguf" to 103771680L,
+            "InternVL3-2B-Instruct-Q4_K_M.gguf" to 1116758816L,
+            "mmproj-InternVL3-2B-Instruct-Q8_0.gguf" to 337012000L,
         )
         val dir = outputDir.get().asFile.resolve("bundled_model")
         dir.mkdirs()
+        // Drop leftovers from a previously bundled model so they don't get
+        // packaged alongside the current one.
+        dir.listFiles()?.filter { it.name !in files.keys }?.forEach { it.delete() }
         files.forEach { (name, expectedSize) ->
             val target = dir.resolve(name)
             if (target.exists() && target.length() == expectedSize) return@forEach

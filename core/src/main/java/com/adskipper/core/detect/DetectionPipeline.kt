@@ -3,6 +3,7 @@ package com.adskipper.core.detect
 import android.graphics.Bitmap
 import android.view.accessibility.AccessibilityNodeInfo
 import com.adskipper.core.data.AppSettings
+import com.adskipper.core.model.ModelInfo
 import com.adskipper.core.vlm.VlmEngine
 
 /**
@@ -66,9 +67,13 @@ class DetectionPipeline<I>(
     }
 
     companion object {
-        fun create(engine: VlmEngine, settings: AppSettings): DetectionPipeline<Bitmap> {
+        fun create(
+            engine: VlmEngine,
+            settings: AppSettings,
+            model: ModelInfo,
+        ): DetectionPipeline<Bitmap> {
             val ocr = OcrDetector()
-            val vlm = VlmDetector(engine)
+            val vlm = VlmDetector(engine, model)
             return DetectionPipeline<Bitmap>(
                 l1 = { root, keywords ->
                     NodeMatcher.findSkipNode(root, keywords)

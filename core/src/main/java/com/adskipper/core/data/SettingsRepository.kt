@@ -17,12 +17,13 @@ data class AppSettings(
     val masterEnabled: Boolean = true,
     val layer1Enabled: Boolean = true,
     val layer2Enabled: Boolean = true,
-    // L3 runs the bundled SmolVLM2 256M model by default (no download needed).
+    // L3 runs the bundled InternVL3-2B model by default (no download needed).
     val layer3Enabled: Boolean = true,
     val keywords: Set<String> = DEFAULT_KEYWORDS,
     val whitelist: Set<String> = DEFAULT_WHITELIST,
     val vlmThreads: Int = 4,
-    val vlmTimeoutMs: Long = 4000L,
+    // 896px input quadruples image tokens vs the old 448px; leave headroom.
+    val vlmTimeoutMs: Long = 8000L,
     val debugOverlay: Boolean = false,
     // Allow the service to act on our own package (fake-ad test screen).
     val selfTest: Boolean = false,

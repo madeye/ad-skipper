@@ -6,7 +6,7 @@
 |---|---|---|---|
 | L1 | 无障碍节点文本匹配（跳过 / Skip / skip_ad…） | <10ms | 原生 UI 的大多数 App |
 | L2 | ML Kit 本地中文 OCR | ~100ms | Flutter / Unity / 游戏等无 UI 树的 App |
-| L3 | 本地 VLM Grounding（llama.cpp + GGUF） | ~1s | 倒计时圆环、混淆按钮、纯图片按钮 |
+| L3 | 本地 VLM Grounding（llama.cpp + GGUF） | ~2-4s | 倒计时圆环、混淆按钮、纯图片按钮 |
 
 命中即短路，L2/L3 只有在前一层未命中时才执行；命中后通过无障碍手势模拟点击。
 
@@ -72,11 +72,14 @@ brew install vulkan-headers spirv-headers shaderc   # glslc 由 shaderc 提供
 ## 使用
 
 1. 打开 App，按首页引导开启无障碍服务（设置 → 无障碍 → 广告跳过）。
-2. 默认 L1/L2/L3 全部开启：L3 使用内置的 SmolVLM2 256M（Q8_0，约 266MB，
-   打包在 APK assets 中，首次使用时自动解压到私有目录），无需下载即可用。
-3. 需要更强定位能力时在「模型」页下载 Qwen2.5-VL 3B / MiniCPM-V 2.6
-   （源：ModelScope，失败自动回退 hf-mirror；也支持手动导入 GGUF + mmproj），
-   选中后自动切换。
+2. 默认 L1/L2/L3 全部开启：L3 使用内置的 InternVL3 2B（Q4_K_M + Q8_0 mmproj，
+   约 1.4GB，打包在 APK assets 中，首次使用时自动解压到私有目录），无需下载
+   即可用。该模型为 2026-08 grounding 基准测试（`/Volumes/DATA/workspace/
+   vlm-bench/REPORT.md`）的最优体积/精度折中：896px 输入下 16/20 命中、
+   0 次误点广告 CTA，体积仅为次优模型的一半。
+3. 备选：「模型」页可下载 Qwen2.5-VL 3B（Q4_K_M + Q8_0 mmproj，约 2.8GB，
+   672px 输入下精度与内置模型相当；源：ModelScope，失败自动回退 hf-mirror；
+   也支持手动导入 GGUF + mmproj），选中后自动切换。
 4. 「设置」页可配置关键词、白名单、调试悬浮窗（命中时显示层级与坐标）。
 
 构建期会从 ModelScope 下载内置模型（`:core:downloadBundledModel`，缓存于

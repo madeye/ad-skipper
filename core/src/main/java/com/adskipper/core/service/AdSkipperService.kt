@@ -97,7 +97,8 @@ class AdSkipperService : AccessibilityService() {
         if (processing.get()) return
         lastAttemptAt[pkg] = now
 
-        val pipeline = DetectionPipeline.create(engine, s)
+        val model = ModelCatalog.byId(s.activeModelId) ?: ModelCatalog.default
+        val pipeline = DetectionPipeline.create(engine, s, model)
         scope.launch { runDetection(pkg, pipeline, s) }
     }
 

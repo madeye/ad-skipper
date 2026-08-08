@@ -16,11 +16,15 @@ import com.adskipper.core.model.ModelCatalog
 import com.adskipper.core.model.ModelManager
 import com.adskipper.core.vlm.VlmEngine
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import timber.log.Timber
 import java.util.concurrent.ConcurrentHashMap
@@ -51,6 +55,9 @@ class AdSkipperService : AccessibilityService() {
     private val lastEventAt = ConcurrentHashMap<String, Long>()
     private val sessionStartAt = ConcurrentHashMap<String, Long>()
     private val processing = AtomicBoolean(false)
+
+    /** Active splash-window pollers, one per package. */
+    private val pollJobs = ConcurrentHashMap<String, Job>()
 
     /** Home/launcher apps resolved from the device, always skipped: splash ads
      *  never appear there, and this app's own icon sits on the home screen —
@@ -168,61 +175,107 @@ class AdSkipperService : AccessibilityService() {
 
         val now = android.os.SystemClock.elapsedRealtime()
 
-        // Splash ads only exist in the first seconds after an app (re)starts.
-        // Outside that window, image-based L3 detectors must not run: unlike
-        // L1/L2 keyword matching they will occasionally see "skip buttons" in
-        // ordinary UI and tap them. Self-test is exempt so the in-app mock ad
-        // can exercise L3 at any time.
+        // Another package took the foreground: its predecessor's poller must
+        // not keep tapping through the new window.
+        if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+            pollJobs.keys.forEach { other ->
+                if (other != pkg) pollJobs.remove(other)?.cancel()
+            }
+        }
+
         val prevEvent = lastEventAt.put(pkg, now)
         if (prevEvent == null || now - prevEvent > SESSION_GAP_MS) {
             sessionStartAt[pkg] = now
         }
         val inSplashWindow = now - (sessionStartAt[pkg] ?: 0L) <= SPLASH_WINDOW_MS
-        val allowL3 = inSplashWindow || (s.selfTest && pkg == packageName)
-        val effective = if (allowL3) s else s.copy(layer3Enabled = false)
-        if (!effective.layer1Enabled && !effective.layer2Enabled && !effective.layer3Enabled) return
 
+        // Splash ads only exist in the first seconds after an app (re)starts,
+        // and that window is covered by a polling loop rather than by events:
+        // a launch emits a single early event burst — while a stale snapshot
+        // starting window still covers the not-yet-interactive UI — and the ad
+        // countdown that follows often emits no events at all. The self-test
+        // mock ad goes through the same poller so it exercises the real path.
+        if (inSplashWindow || (s.selfTest && pkg == packageName)) {
+            startSplashPoller(pkg)
+            return
+        }
+
+        // Steady state, event-driven: keyword layers only — unlike L1/L2
+        // matching, image-based L3 detectors would occasionally see "skip
+        // buttons" in ordinary UI and tap them.
+        val effective = s.copy(layer3Enabled = false)
+        if (!effective.layer1Enabled && !effective.layer2Enabled) return
         val last = lastAttemptAt[pkg] ?: 0L
         if (now - last < ATTEMPT_COOLDOWN_MS) return
         if (processing.get()) return
-        lastAttemptAt[pkg] = now
-
-        val model = ModelCatalog.byId(effective.activeModelId) ?: ModelCatalog.default
-        val pipeline = DetectionPipeline.create(engine, effective, model, yolo, selfLabels)
-        scope.launch { runDetection(pkg, pipeline, effective) }
+        scope.launch { runDetection(pkg, effective) }
     }
 
-    private suspend fun runDetection(
-        pkg: String,
-        pipeline: DetectionPipeline<android.graphics.Bitmap>,
-        s: AppSettings,
-    ) {
+    /** Runs the pipeline on a fixed cadence for the duration of [pkg]'s splash
+     *  window. Polling sidesteps the two ways event-driven detection loses the
+     *  race against a splash ad: the launch burst arrives too early (stale
+     *  snapshot on screen, targets not yet tappable) and the ad itself emits no
+     *  events. Re-detection on the next tick doubles as tap verification — a
+     *  target that survived a tap gets tapped again, up to [SPLASH_MAX_TAPS]. */
+    private fun startSplashPoller(pkg: String) {
+        if (pollJobs.containsKey(pkg)) return
+        val job = scope.launch(start = CoroutineStart.LAZY) {
+            delay(SPLASH_POLL_INITIAL_DELAY_MS)
+            var taps = 0
+            while (isActive && taps < SPLASH_MAX_TAPS) {
+                val s = settings.value
+                if (!s.masterEnabled) break
+                if (!s.layer1Enabled && !s.layer2Enabled && !s.layer3Enabled) break
+                val selfTesting = s.selfTest && pkg == packageName
+                if (selfTesting && !selfTestAdVisible) break
+                val start = sessionStartAt[pkg] ?: break
+                if (!selfTesting &&
+                    android.os.SystemClock.elapsedRealtime() - start > SPLASH_WINDOW_MS
+                ) break
+                if (runDetection(pkg, s)) taps++
+                delay(SPLASH_POLL_INTERVAL_MS)
+            }
+        }
+        if (pollJobs.putIfAbsent(pkg, job) == null) {
+            job.invokeOnCompletion { pollJobs.remove(pkg, job) }
+            job.start()
+        } else {
+            job.cancel()
+        }
+    }
+
+    /** One pipeline pass; returns true when a target was found and tapped. */
+    private suspend fun runDetection(pkg: String, s: AppSettings): Boolean {
         if (!processing.compareAndSet(false, true)) {
             Timber.d("detection already running, skip %s", pkg)
-            return
+            return false
         }
+        lastAttemptAt[pkg] = android.os.SystemClock.elapsedRealtime()
         Timber.d("detecting in %s", pkg)
         val t0 = android.os.SystemClock.elapsedRealtime()
         try {
+            val model = ModelCatalog.byId(s.activeModelId) ?: ModelCatalog.default
+            val pipeline = DetectionPipeline.create(engine, s, model, yolo, selfLabels)
             val result = pipeline.detect(
                 root = rootInActiveWindow,
                 screenshot = { ScreenshotCapturer.capture(this) },
                 settings = s,
             )
-            val target = result.target ?: return
+            val target = result.target ?: return false
             Timber.i(
                 "skip hit in %s via %s at (%.0f, %.0f), timings=%s",
                 pkg, target.layer, target.x, target.y, result.timings,
             )
-            if (performClick(target.x, target.y)) {
-                val elapsed = android.os.SystemClock.elapsedRealtime() - t0
-                statsRepo.record(pkg, target.layer.name, elapsed)
-                if (s.debugOverlay) {
-                    overlay.update("${target.layer}  (${target.x.toInt()}, ${target.y.toInt()})  ${elapsed}ms")
-                }
+            if (!performClick(target.x, target.y)) return false
+            val elapsed = android.os.SystemClock.elapsedRealtime() - t0
+            statsRepo.record(pkg, target.layer.name, elapsed)
+            if (s.debugOverlay) {
+                overlay.update("${target.layer}  (${target.x.toInt()}, ${target.y.toInt()})  ${elapsed}ms")
             }
+            return true
         } catch (t: Throwable) {
             Timber.w(t, "detection failed for %s", pkg)
+            return false
         } finally {
             processing.set(false)
         }
@@ -256,6 +309,16 @@ class AdSkipperService : AccessibilityService() {
         /** Gap without events after which the next event starts a new session. */
         private const val SESSION_GAP_MS = 20_000L
         private const val TAP_DURATION_MS = 50L
+
+        /** Skipped before the first splash poll: launch transitions briefly
+         *  show a snapshot of the app's previous session, and both OCR and the
+         *  node tree see that stale frame. */
+        private const val SPLASH_POLL_INITIAL_DELAY_MS = 500L
+        private const val SPLASH_POLL_INTERVAL_MS = 750L
+
+        /** Taps per splash session are capped so a phantom target (matched but
+         *  not dismissible) is never tapped indefinitely. */
+        private const val SPLASH_MAX_TAPS = 3
 
         private const val KEEPALIVE_CHANNEL_ID = "keepalive"
         private const val KEEPALIVE_NOTIFICATION_ID = 1

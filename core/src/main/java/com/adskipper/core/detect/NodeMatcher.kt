@@ -14,6 +14,12 @@ object NodeMatcher {
         excluded: Collection<String> = emptySet(),
     ): Rect? {
         root ?: return null
+        // A keyword match whose bounds cover (nearly) the whole screen is
+        // never the skip button — e.g. Douban's `id/skip` is a full-screen,
+        // text-less container; tapping its center hits the ad click-through
+        // area. Real skip buttons are small.
+        val rootBounds = Rect().also { root.getBoundsInScreen(it) }
+        val maxArea = rootBounds.width() * rootBounds.height() / 3
         val clickableHits = ArrayList<Rect>()
         val otherHits = ArrayList<Rect>()
         val queue = ArrayDeque<AccessibilityNodeInfo>()
@@ -33,7 +39,7 @@ object NodeMatcher {
                 if (textMatch != null || descMatch != null || idMatch != null) {
                     val bounds = Rect()
                     node.getBoundsInScreen(bounds)
-                    if (!bounds.isEmpty) {
+                    if (!bounds.isEmpty && bounds.width() * bounds.height() <= maxArea) {
                         (if (node.isClickable) clickableHits else otherHits).add(bounds)
                     }
                 }

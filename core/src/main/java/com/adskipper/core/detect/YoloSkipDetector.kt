@@ -57,6 +57,14 @@ class YoloSkipDetector(private val context: Context) {
         }
     }
 
+    /** Build the native engine ahead of the first splash: cold init (Vulkan
+     *  device + model load) takes ~3s on a flagship, which would otherwise be
+     *  paid inside the first splash window after service (re)start. */
+    fun warmUp() {
+        if (!isReady) return
+        executor.execute { ensureInit() }
+    }
+
     // ---- executor thread only ----
 
     private fun detect(bitmap: Bitmap): Rect? {

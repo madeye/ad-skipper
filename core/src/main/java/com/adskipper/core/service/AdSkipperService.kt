@@ -2,9 +2,20 @@ package com.adskipper.core.service
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
+import android.app.AlarmManager
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.graphics.Path
+import android.graphics.PixelFormat
+import android.os.Handler
+import android.os.Looper
+import android.os.PowerManager
+import android.view.Gravity
+import android.view.View
+import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import com.adskipper.core.data.AppSettings
 import com.adskipper.core.data.SettingsRepository
@@ -59,6 +70,74 @@ class AdSkipperService : AccessibilityService() {
     /** Active splash-window pollers, one per package. */
     private val pollJobs = ConcurrentHashMap<String, Job>()
 
+    /** Held for the duration of a splash window; see holdSplashWakeLock. */
+    @Volatile
+    private var splashWakeLock: android.os.PowerManager.WakeLock? = null
+
+    /** Self-thaw machinery for OEM process freezers; see startThawPulse. */
+    private val pulseHandler = Handler(Looper.getMainLooper())
+    private var pulseView: View? = null
+    @Volatile
+    private var pulseActive = false
+
+    private val pulseRunnable = object : Runnable {
+        override fun run() {
+            if (!pulseActive) return
+            if (pulseView == null) ensurePulseView() // retry after transient add failures
+            try {
+                pulseView?.sendAccessibilityEvent(
+                    AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED)
+            } catch (t: Throwable) {
+                Timber.w(t, "thaw pulse failed")
+            }
+            pulseHandler.postDelayed(this, THAW_PULSE_INTERVAL_MS)
+        }
+    }
+
+    /** Pulse only needs to run while the screen is on (no splash ads on a dark
+     *  screen); SCREEN_OFF stops it so the process can be frozen while idle.
+     *  The matching SCREEN_ON restart is best-effort — HyperOS does not
+     *  deliver broadcasts into a frozen process — so the watchdog alarm below
+     *  is the guaranteed restart path. */
+    private val screenReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            when (intent.action) {
+                Intent.ACTION_SCREEN_ON -> startThawPulse()
+                Intent.ACTION_SCREEN_OFF -> stopThawPulse()
+            }
+        }
+    }
+
+    /** Alarm delivery is the one mechanism HyperOS GreezeManager reliably
+     *  thaws a frozen process for (logcat: `THAW uid=... reason : alarm`).
+     *  Accessibility-event delivery does NOT thaw (verified 2026-08-08: a
+     *  Douban cold start delivered zero events into the frozen service), so
+     *  once frozen — e.g. after a screen-off period — the process would stay
+     *  frozen forever without this. Each firing restarts the pulse chain if
+     *  the screen is on, then re-arms. */
+    private val watchdogListener = AlarmManager.OnAlarmListener {
+        if (getSystemService(PowerManager::class.java).isInteractive) startThawPulse()
+        scheduleWatchdog()
+    }
+
+    private fun scheduleWatchdog() {
+        try {
+            // Non-wakeup on purpose: while the screen is on the pulse chain
+            // prevents freezing anyway, and an alarm that expired during
+            // sleep is delivered the moment the device wakes — which is
+            // exactly when a thaw is needed. Costs zero wakeups.
+            getSystemService(AlarmManager::class.java).setExact(
+                AlarmManager.ELAPSED_REALTIME,
+                android.os.SystemClock.elapsedRealtime() + WATCHDOG_INTERVAL_MS,
+                "adskipper:thaw-watchdog",
+                watchdogListener,
+                pulseHandler,
+            )
+        } catch (t: Throwable) {
+            Timber.w(t, "watchdog schedule failed")
+        }
+    }
+
     /** Home/launcher apps resolved from the device, always skipped: splash ads
      *  never appear there, and this app's own icon sits on the home screen —
      *  an image L3 false positive would tap it. The static DEFAULT_WHITELIST
@@ -83,9 +162,32 @@ class AdSkipperService : AccessibilityService() {
         engine = VlmEngine()
         overlay = DebugOverlay(this)
         yolo = YoloSkipDetector(this).takeIf { it.isReady }
+        // Cold-init of the YOLO native engine (Vulkan device + pipeline
+        // creation + model load) takes ~3s; paid inside the first splash
+        // window it would eat most of it. Warm it up shortly after connect
+        // instead — but NOT immediately: ncnn's Vulkan load_model SIGSEGVd
+        // when called ~1-3s after process start on HyperOS (tombstone:
+        // null deref in Net::load_model, uptime 3s), whereas the same init
+        // succeeds once the process has settled.
+        scope.launch {
+            delay(YOLO_WARMUP_DELAY_MS)
+            yolo?.warmUp()
+        }
         homePackages = resolveHomePackages() + HOME_SURFACE_PACKAGES
         selfLabels = setOf(applicationInfo.loadLabel(packageManager).toString())
         scope.launch { settingsRepo.seedDefaultLauncher() }
+
+        // Freeze prevention must be continuous, not splash-scoped: HyperOS
+        // freezes this process ~1s after the last accessibility event and
+        // does NOT thaw it to deliver new events — a frozen service misses
+        // the app-launch event entirely, so no poller ever starts and the
+        // whole pipeline is dead (verified 2026-08-08 on Douban cold starts).
+        registerReceiver(screenReceiver, IntentFilter().apply {
+            addAction(Intent.ACTION_SCREEN_ON)
+            addAction(Intent.ACTION_SCREEN_OFF)
+        })
+        if (getSystemService(PowerManager::class.java).isInteractive) startThawPulse()
+        scheduleWatchdog()
 
         scope.launch {
             settingsRepo.settings.collect { new ->
@@ -175,13 +277,13 @@ class AdSkipperService : AccessibilityService() {
 
         val now = android.os.SystemClock.elapsedRealtime()
 
-        // Another package took the foreground: its predecessor's poller must
-        // not keep tapping through the new window.
-        if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
-            pollJobs.keys.forEach { other ->
-                if (other != pkg) pollJobs.remove(other)?.cancel()
-            }
-        }
+        // NOTE: a foreign package's window-state change must NOT cancel this
+        // package's splash poller. HyperOS fires transient permissioncontroller
+        // window events during cold starts; cancelling here killed Douban's
+        // poller mid-window and — since a video splash ad emits no further
+        // accessibility events — it never restarted, so the ad played out.
+        // Tapping through a genuinely different foreground window is instead
+        // prevented by the active-window guard in runDetection().
 
         val prevEvent = lastEventAt.put(pkg, now)
         if (prevEvent == null || now - prevEvent > SESSION_GAP_MS) {
@@ -237,15 +339,124 @@ class AdSkipperService : AccessibilityService() {
             }
         }
         if (pollJobs.putIfAbsent(pkg, job) == null) {
-            job.invokeOnCompletion { pollJobs.remove(pkg, job) }
+            Timber.d("splash poller start for %s", pkg)
+            holdSplashWakeLock()
+            // The pulse chain normally runs whenever the screen is on, but the
+            // watchdog may not have caught up yet after a thaw — an event just
+            // arrived, so the process is provably running: re-arm here.
+            startThawPulse()
+            job.invokeOnCompletion { cause ->
+                Timber.d("splash poller exit for %s (%s)", pkg, cause?.javaClass?.simpleName ?: "done")
+                pollJobs.remove(pkg, job)
+                if (pollJobs.isEmpty()) releaseSplashWakeLock()
+            }
             job.start()
         } else {
             job.cancel()
         }
     }
 
+    /** HyperOS GreezeManager cgroup-freezes this process ~1s after the last
+     *  accessibility event (observed: cgroup.freeze=1; held wake locks are
+     *  force-disabled by the freezer) and never thaws it for event delivery.
+     *  The thaw pulse keeps a minimal self-sustaining event stream alive:
+     *  each pulse makes an invisible 1px overlay view emit a content-changed
+     *  event, whose round-trip through system_server resets the freezer's
+     *  inactivity timer, during which the next pulse is posted. The pulse
+     *  interval must stay well below the freezer's ~1s grace period. Runs
+     *  whenever the screen is interactive; pending postDelayed messages
+     *  survive a freeze, so the chain self-resumes after any thaw. */
+    private fun startThawPulse() {
+        if (pulseActive) return
+        Timber.d("thaw pulse start")
+        pulseActive = true
+        ensurePulseView()
+        pulseHandler.post(pulseRunnable)
+    }
+
+    private fun ensurePulseView() {
+        if (pulseView != null) return
+        try {
+            val v = View(this)
+            v.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_YES
+            val lp = WindowManager.LayoutParams(
+                1, 1,
+                WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
+                PixelFormat.TRANSLUCENT,
+            )
+            lp.gravity = Gravity.TOP or Gravity.START
+            lp.alpha = 0f
+            getSystemService(WindowManager::class.java).addView(v, lp)
+            pulseView = v
+        } catch (t: Throwable) {
+            // A stale binding (post-crash rebind on HyperOS) rejects the
+            // overlay token with BadTokenException; retried by pulseRunnable.
+            Timber.w(t, "thaw pulse view failed")
+        }
+    }
+
+    /** Stops the pulse chain but keeps the overlay view attached — it is
+     *  invisible and free while idle, and re-adding a window on every screen
+     *  cycle would be churn. Removed only in [onDestroy]. */
+    private fun stopThawPulse() {
+        if (pulseActive) Timber.d("thaw pulse stop")
+        pulseActive = false
+        pulseHandler.removeCallbacks(pulseRunnable)
+    }
+
+    private fun removePulseView() {
+        pulseView?.let {
+            try {
+                getSystemService(WindowManager::class.java).removeView(it)
+            } catch (t: Throwable) {
+                Timber.w(t, "thaw pulse view removal failed")
+            }
+        }
+        pulseView = null
+    }
+
+    /** HyperOS GreezeManager cgroup-freezes this process ~0.5s after the
+     *  last accessibility event; a silent video splash ad (Douban) emits
+     *  none, so without a wake lock the poll loop stops getting CPU right
+     *  when the ad appears (observed: cgroup.freeze=1 for the whole window).
+     *  A partial wake lock is held for the splash window only — it is
+     *  acquired here, i.e. during an event delivery, while the process is
+     *  guaranteed to be running. */
+    private fun holdSplashWakeLock() {
+        try {
+            if (splashWakeLock?.isHeld == true) return
+            val pm = getSystemService(PowerManager::class.java)
+            splashWakeLock = pm.newWakeLock(
+                PowerManager.PARTIAL_WAKE_LOCK,
+                "adskipper:splash",
+            ).apply { acquire(SPLASH_WINDOW_MS + 10_000L) } // auto-release backstop
+        } catch (t: Throwable) {
+            Timber.w(t, "wake lock acquire failed")
+        }
+    }
+
+    private fun releaseSplashWakeLock() {
+        try {
+            splashWakeLock?.takeIf { it.isHeld }?.release()
+        } catch (t: Throwable) {
+            Timber.w(t, "wake lock release failed")
+        }
+        splashWakeLock = null
+    }
+
     /** One pipeline pass; returns true when a target was found and tapped. */
     private suspend fun runDetection(pkg: String, s: AppSettings): Boolean {
+        // Never detect or tap unless [pkg] owns the active window: transient
+        // overlay windows (HyperOS permissioncontroller pops up during cold
+        // starts) must neither be tapped themselves nor cause their
+        // full-screen screenshot to be tapped at the ad's coordinates.
+        val root = rootInActiveWindow
+        if (root?.packageName?.toString() != pkg) {
+            Timber.d("active window is not %s, skip tick", pkg)
+            return false
+        }
         if (!processing.compareAndSet(false, true)) {
             Timber.d("detection already running, skip %s", pkg)
             return false
@@ -257,11 +468,18 @@ class AdSkipperService : AccessibilityService() {
             val model = ModelCatalog.byId(s.activeModelId) ?: ModelCatalog.default
             val pipeline = DetectionPipeline.create(engine, s, model, yolo, selfLabels)
             val result = pipeline.detect(
-                root = rootInActiveWindow,
-                screenshot = { ScreenshotCapturer.capture(this) },
+                root = root,
+                screenshot = {
+                    ScreenshotCapturer.capture(this)?.also { bmp ->
+                        if (s.debugOverlay) dumpDebugFrame(bmp)
+                    }
+                },
                 settings = s,
             )
-            val target = result.target ?: return false
+            val target = result.target ?: run {
+                Timber.d("no target in %s, timings=%s", pkg, result.timings)
+                return false
+            }
             Timber.i(
                 "skip hit in %s via %s at (%.0f, %.0f), timings=%s",
                 pkg, target.layer, target.x, target.y, result.timings,
@@ -281,6 +499,23 @@ class AdSkipperService : AccessibilityService() {
         }
     }
 
+    /** Debug aid (debugOverlay on): persist the frames the pipeline actually
+     *  sees during splash windows, so detector misses can be distinguished
+     *  from stale takeScreenshot frames. Pull via run-as from filesDir/shots. */
+    private fun dumpDebugFrame(bmp: android.graphics.Bitmap) {
+        scope.launch(Dispatchers.IO) {
+            try {
+                val dir = java.io.File(filesDir, "shots").apply { mkdirs() }
+                val old = dir.listFiles()?.sortedBy { it.name }.orEmpty()
+                old.dropLast(KEEP_DEBUG_FRAMES - 1).forEach { it.delete() }
+                java.io.File(dir, "${System.currentTimeMillis()}.png")
+                    .outputStream().use { bmp.compress(android.graphics.Bitmap.CompressFormat.PNG, 90, it) }
+            } catch (t: Throwable) {
+                Timber.w(t, "debug frame dump failed")
+            }
+        }
+    }
+
     private fun performClick(x: Float, y: Float): Boolean {
         val path = Path().apply { moveTo(x, y) }
         val gesture = GestureDescription.Builder()
@@ -295,6 +530,19 @@ class AdSkipperService : AccessibilityService() {
 
     override fun onDestroy() {
         overlay.dismiss()
+        releaseSplashWakeLock()
+        stopThawPulse()
+        removePulseView()
+        try {
+            unregisterReceiver(screenReceiver)
+        } catch (t: Throwable) {
+            Timber.w(t, "screen receiver unregister failed")
+        }
+        try {
+            getSystemService(AlarmManager::class.java).cancel(watchdogListener)
+        } catch (t: Throwable) {
+            Timber.w(t, "watchdog cancel failed")
+        }
         scope.launch { engine.release() }
         scope.cancel()
         super.onDestroy()
@@ -309,6 +557,22 @@ class AdSkipperService : AccessibilityService() {
         /** Gap without events after which the next event starts a new session. */
         private const val SESSION_GAP_MS = 20_000L
         private const val TAP_DURATION_MS = 50L
+
+        /** Self-thaw pulse cadence; must stay below the ~1s freeze grace
+         *  period observed for HyperOS GreezeManager. */
+        private const val THAW_PULSE_INTERVAL_MS = 300L
+
+        /** Watchdog alarm cadence. Bounds how long the service can stay
+         *  frozen (and thus miss app launches) after waking from a
+         *  screen-off period. Non-wakeup alarm, so no sleep-battery cost. */
+        private const val WATCHDOG_INTERVAL_MS = 60_000L
+
+        /** Delay before warming up the YOLO native engine after connect;
+         *  see onServiceConnected. */
+        private const val YOLO_WARMUP_DELAY_MS = 8000L
+
+        /** How many pipeline frames to keep for debugOverlay frame dumps. */
+        private const val KEEP_DEBUG_FRAMES = 12
 
         /** Skipped before the first splash poll: launch transitions briefly
          *  show a snapshot of the app's previous session, and both OCR and the

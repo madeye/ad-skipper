@@ -41,7 +41,7 @@ fun Project.setupCore() {
             versionCode = java.time.LocalDateTime.now()
                 .format(java.time.format.DateTimeFormatter.ofPattern("yyyyMMddHH"))
                 .toInt()
-            versionName = "1.0"
+            versionName = "1.1"
         }
         buildFeatures.buildConfig = true
     }
@@ -51,6 +51,22 @@ fun Project.setupApp() {
     setupCore()
 
     android.apply {
+        // Release signing from local.properties (never committed):
+        // KEYSTORE_PATH / KEYSTORE_PASSWORD / KEY_ALIAS / KEY_PASSWORD.
+        // Absent keys (e.g. CI) leave the release build unsigned.
+        val props = java.util.Properties().apply {
+            val f = project.rootProject.file("local.properties")
+            if (f.exists()) f.inputStream().use(::load)
+        }
+        val keystorePath = props.getProperty("KEYSTORE_PATH")
+        if (keystorePath != null) {
+            signingConfigs.create("release") {
+                storeFile = project.file(keystorePath)
+                storePassword = props.getProperty("KEYSTORE_PASSWORD")
+                keyAlias = props.getProperty("KEY_ALIAS")
+                keyPassword = props.getProperty("KEY_PASSWORD")
+            }
+        }
         buildTypes {
             getByName("debug") {
                 isPseudoLocalesEnabled = true
@@ -60,6 +76,7 @@ fun Project.setupApp() {
                 isMinifyEnabled = true
                 proguardFile(getDefaultProguardFile("proguard-android.txt"))
                 proguardFile("proguard-rules.pro")
+                signingConfigs.findByName("release")?.let { signingConfig = it }
             }
         }
         packagingOptions.jniLibs.useLegacyPackaging = true

@@ -91,7 +91,7 @@ brew install vulkan-headers spirv-headers shaderc   # glslc 由 shaderc 提供
 1. 打开 App，按首页引导开启无障碍服务（设置 → 无障碍 → 广告跳过）。
 2. 默认 L1/L2/L3 全部开启：L3 首先运行内置的 YOLO11n 跳过按钮检测器
    （在 2026-08 grounding 基准上 20/20 命中、0 次误点 CTA，超过 1.5GB 级
-   VLM，见 `/Volumes/DATA/workspace/vlm-bench/REPORT.md`），无需下载。
+   VLM，见 [vlm-bench REPORT](https://github.com/madeye/vlm-bench/blob/main/REPORT.md)），无需下载。
    检测器跑在 ncnn 上（Vulkan compute，无 Vulkan / 驱动异常时自动回退
    CPU/NEON），模型为 Ultralytics 官方 NCNN 导出（fp16，约 5MB，val 集
    mAP50 0.992）。
@@ -115,10 +115,35 @@ brew install vulkan-headers spirv-headers shaderc   # glslc 由 shaderc 提供
 - llama.cpp 侧：mtmd API（`tools/mtmd`），当前 pin 在 master `a1f96d4`，
   升级 llama.cpp 后需重新验证 `vlm_jni.cpp` 的 API 兼容性。
 
+## YOLO 检测器训练
+
+内置的 L3a 跳过按钮检测器在 [madeye/vlm-bench](https://github.com/madeye/vlm-bench)
+中训练与评测（该仓库同时包含选型 VLM 的 grounding 基准与结论，见其
+[REPORT.md](https://github.com/madeye/vlm-bench/blob/main/REPORT.md)）。完整流程：
+
+1. **合成数据集**（`gen_yolo_data.py`）：2400 训练 + 240 验证张合成开屏广告，
+   随机配色 / 字体 / 版式 / 按钮样式与位置，含硬负样本（倒计时、CTA 按钮、
+   「{n}秒后自动进入」等易混文案），约 10% 图完全没有跳过按钮。首轮模型在
+   真实界面上 16/16 误报，因此追加约 300 张真实 UI 截图增广作为负样本微调。
+2. **训练**：Ultralytics YOLO11n（约 2.6M 参数），640 letterbox 输入；
+   `skip_v1` 先在纯合成集上训练，再以负样本微调得到 `skip_v2`
+   （15 epochs，batch 32，可在 Apple MPS 上完成）。
+3. **评测**（`eval_yolo.py`）：val 集 mAP50 0.992 / P 0.98 / R 0.972；
+   grounding 基准 19/20 命中、0 次误点 CTA、宿主 CPU 约 21ms/张，
+   优于所测的全部 VLM（含 InternVL3-2B）。
+4. **导出**：`yolo export format=ncnn`（fp16，约 5MB）产出
+   `yolo.ncnn.param` / `yolo.ncnn.bin`，替换本仓库
+   `core/src/main/assets/` 下的同名文件即可生效（输出布局 `[1,5,8400]`，
+   坐标为 640 letterbox 像素，解析见 `YoloSkipDetector`）。
+
+注意：训练与评测目前均基于合成数据，真实开屏广告的召回未系统验证；
+收集真实截图做微调 / 评测是收益最高的下一步。
+
 ## 网络说明
 
-- `gradle.properties` 内置了本机代理（127.0.0.1:7890）的 `systemProp.http(s).proxyHost`，
-  因为 JVM/Gradle 不读 `*_PROXY` 环境变量，直连 dl.google.com 会卡死。无代理环境请删除这几行。
+- JVM/Gradle 不读 `*_PROXY` 环境变量；需要代理直连 dl.google.com 的机器请把
+  `systemProp.http(s).proxyHost/Port` 写进 **用户级** `~/.gradle/gradle.properties`
+  （不要提交到仓库的 `gradle.properties`，否则 CI 与他人构建会被本机代理搞挂）。
 - 依赖仓库官方源在前、阿里云镜像兜底；插件仓库只用官方源（阿里云 gradle-plugin 镜像元数据不全）。
 - 模型下载走 OkHttp，ModelScope 国内直连，无需代理。
 

@@ -17,7 +17,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: 17
@@ -34,7 +34,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: 17
@@ -65,8 +65,27 @@ jobs:
           cmake -S /tmp/spirv-headers -B /tmp/spirv-headers/build
           sudo cmake --install /tmp/spirv-headers/build --prefix /usr/local
 
+      # The llama.cpp/ggml C++ build dominates the job; ccache turns repeat
+      # builds into cache hits. CMake picks the launcher up from the
+      # CMAKE_*_COMPILER_LAUNCHER environment variables at configure time.
+      - name: Set up ccache
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q ccache
+          echo "CMAKE_C_COMPILER_LAUNCHER=ccache" >> "$GITHUB_ENV"
+          echo "CMAKE_CXX_COMPILER_LAUNCHER=ccache" >> "$GITHUB_ENV"
+          echo "CCACHE_DIR=$HOME/.ccache" >> "$GITHUB_ENV"
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ccache-${{ runner.os }}-${{ github.sha }}
+          restore-keys: ccache-${{ runner.os }}-
+
       - name: Assemble debug APK
         run: ./gradlew :mobile:assembleDebug
+
+      - name: ccache stats
+        run: ccache --show-stats
 
       - uses: actions/upload-artifact@v4
         with:

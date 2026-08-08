@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Run unit tests
+        run: ./gradlew :core:testDebugUnitTest
+
+  build:
+    name: Assemble debug APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      # Vendored at build time, gitignored (see README 构建).
+      - name: Fetch llama.cpp
+        run: git clone --depth 1 https://github.com/ggml-org/llama.cpp.git core/src/main/cpp/llama.cpp
+
+      - name: Fetch ncnn prebuilt libs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download 20260526 -R Tencent/ncnn -p ncnn-20260526-android-vulkan.zip
+          unzip -q ncnn-20260526-android-vulkan.zip
+          mv ncnn-20260526-android-vulkan core/src/main/cpp/ncnn
+
+      # ggml-vulkan needs host Vulkan-Headers (vulkan.hpp) and the
+      # SPIRV-Headers cmake package; install both under /usr/local where the
+      # project CMakeLists already looks. glslc comes from the NDK.
+      - name: Install Vulkan headers
+        run: |
+          git clone --depth 1 https://github.com/KhronosGroup/Vulkan-Headers.git /tmp/vulkan-headers
+          cmake -S /tmp/vulkan-headers -B /tmp/vulkan-headers/build
+          sudo cmake --install /tmp/vulkan-headers/build --prefix /usr/local
+          git clone --depth 1 https://github.com/KhronosGroup/SPIRV-Headers.git /tmp/spirv-headers
+          cmake -S /tmp/spirv-headers -B /tmp/spirv-headers/build
+          sudo cmake --install /tmp/spirv-headers/build --prefix /usr/local
+
+      - name: Assemble debug APK
+        run: ./gradlew :mobile:assembleDebug
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mobile-debug-apk
+          path: mobile/build/outputs/apk/debug/mobile-debug.apk

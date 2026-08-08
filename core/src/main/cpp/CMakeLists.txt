@@ -54,17 +54,28 @@ if (DEFINED ANDROID_PLATFORM_LEVEL)
 else()
     set(_vulkan_api_dir 30)
 endif()
+# The NDK's host-tag (darwin-x86_64 / linux-x86_64) is set by the Android
+# toolchain file; derive it from the host OS when absent so the same paths
+# resolve on both macOS dev machines and Linux CI runners.
+if (NOT DEFINED ANDROID_HOST_TAG)
+    if (CMAKE_HOST_SYSTEM_NAME STREQUAL "Linux")
+        set(ANDROID_HOST_TAG linux-x86_64)
+    else()
+        set(ANDROID_HOST_TAG darwin-x86_64)
+    endif()
+endif()
 set(Vulkan_LIBRARY
-    ${ANDROID_NDK}/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/lib/aarch64-linux-android/${_vulkan_api_dir}/libvulkan.so
+    ${ANDROID_NDK}/toolchains/llvm/prebuilt/${ANDROID_HOST_TAG}/sysroot/usr/lib/aarch64-linux-android/${_vulkan_api_dir}/libvulkan.so
     CACHE FILEPATH "" FORCE)
 
 # ggml-vulkan needs a host glslc to compile shaders. find_program is confined
 # to the target sysroot by the Android toolchain, so probe literal paths with
-# EXISTS instead (Homebrew first, then the NDK's darwin-x86_64 shader-tools).
+# EXISTS instead (Homebrew/system first, then the NDK's shader-tools).
 foreach(candidate
         /opt/homebrew/bin/glslc
         /usr/local/bin/glslc
-        ${ANDROID_NDK}/shader-tools/darwin-x86_64/glslc)
+        /usr/bin/glslc
+        ${ANDROID_NDK}/shader-tools/${ANDROID_HOST_TAG}/glslc)
     if (EXISTS ${candidate})
         set(Vulkan_GLSLC_EXECUTABLE ${candidate} CACHE FILEPATH "" FORCE)
         break()

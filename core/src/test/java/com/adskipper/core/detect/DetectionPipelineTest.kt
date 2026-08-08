@@ -20,6 +20,8 @@ class DetectionPipelineTest {
 
     private var yoloCalled = false
 
+    private val ocrLines = listOf(OcrLine("广告", 900, 120, 80, 40))
+
     private fun pipeline(
         l1Hit: Pair<Float, Float>? = null,
         l2Hit: Pair<Float, Float>? = null,
@@ -30,7 +32,10 @@ class DetectionPipelineTest {
         yoloCalled = false; screenshotCalled = false
         return DetectionPipeline(
             l1 = { _, _ -> l1Called = true; fakeTime += 5; l1Hit },
-            l2 = { _, _ -> l2Called = true; fakeTime += 100; l2Hit },
+            l2 = { _, _ ->
+                l2Called = true; fakeTime += 100
+                DetectionPipeline.OcrPass(l2Hit, ocrLines)
+            },
             l3 = { _ -> l3Called = true; fakeTime += 1000; l3Hit },
             l3yolo = { _ -> yoloCalled = true; fakeTime += 50; yoloHit },
             clock = clock,
@@ -62,6 +67,15 @@ class DetectionPipelineTest {
         assertTrue(screenshotCalled)
         assertFalse(l2Called)
         assertFalse(l3Called)
+    }
+
+    @Test
+    fun `only L1 enabled takes no screenshot`() = runTest {
+        val settings = AppSettings(layer1Enabled = true, layer2Enabled = false, layer3Enabled = false)
+        val result = pipeline().detect(null, ::screenshotAvailable, settings)
+        assertNull(result.target)
+        assertTrue(l1Called)
+        assertFalse(screenshotCalled)
     }
 
     @Test
@@ -107,5 +121,45 @@ class DetectionPipelineTest {
         assertFalse(l1Called)
         assertFalse(l2Called)
         assertTrue(l3Called)
+    }
+
+    @Test
+    fun `closed image gate blocks YOLO and VLM but not keyword layers`() = runTest {
+        val result = pipeline(l3Hit = 1f to 2f, yoloHit = 3f to 4f)
+            .detect(null, ::screenshotAvailable, allOn, imageLayerGate = { false })
+        assertNull(result.target)
+        assertTrue(l1Called)
+        assertTrue(l2Called)
+        assertFalse(yoloCalled)
+        assertFalse(l3Called)
+    }
+
+    @Test
+    fun `gate sees the L2 OCR lines`() = runTest {
+        var seen: List<OcrLine>? = null
+        pipeline().detect(null, ::screenshotAvailable, allOn, imageLayerGate = { lines ->
+            seen = lines
+            true
+        })
+        assertEquals(ocrLines, seen)
+        assertTrue(l3Called)
+    }
+
+    @Test
+    fun `gate gets empty lines when L2 is disabled`() = runTest {
+        val settings = AppSettings(layer1Enabled = false, layer2Enabled = false, layer3Enabled = true)
+        var seen: List<OcrLine>? = null
+        pipeline(l3Hit = 1f to 2f).detect(null, ::screenshotAvailable, settings, imageLayerGate = {
+            seen = it
+            true
+        })
+        assertEquals(emptyList<OcrLine>(), seen)
+    }
+
+    @Test
+    fun `L2 hit returns before the gate can block`() = runTest {
+        val result = pipeline(l2Hit = 50f to 60f)
+            .detect(null, ::screenshotAvailable, allOn, imageLayerGate = { false })
+        assertEquals(SkipLayer.L2_OCR, result.target?.layer)
     }
 }

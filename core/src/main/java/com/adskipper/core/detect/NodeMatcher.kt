@@ -59,6 +59,27 @@ object NodeMatcher {
         return clickableHits.firstOrNull() ?: otherHits.firstOrNull()
     }
 
+    /** True if any node in the tree (bounded by [cap]) carries an ad-SDK
+     *  class or view-id fingerprint — see [AdSdkSignatures]. Splash trees
+     *  are tiny, so this stays cheap. */
+    fun hasAdSdkMarker(root: AccessibilityNodeInfo?, cap: Int): Boolean {
+        root ?: return false
+        var count = 0
+        val queue = ArrayDeque<AccessibilityNodeInfo>()
+        queue.add(root)
+        while (queue.isNotEmpty()) {
+            val node = queue.removeFirst()
+            if (AdSdkSignatures.matchesClassName(node.className?.toString()) ||
+                AdSdkSignatures.matchesViewId(node.viewIdResourceName)
+            ) return true
+            if (++count >= cap) return false
+            for (i in 0 until node.childCount) {
+                node.getChild(i)?.let(queue::addLast)
+            }
+        }
+        return false
+    }
+
     /** Node count with an early exit at [cap]. Splash/ad screens are a
      *  handful of views (the ad SDK's container), while real app UI is
      *  hundreds — used to decide whether a screen can still be a splash ad

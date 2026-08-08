@@ -17,9 +17,12 @@ import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
+import com.adskipper.core.data.AppProfileRepository
 import com.adskipper.core.data.AppSettings
 import com.adskipper.core.data.SettingsRepository
 import com.adskipper.core.data.StatsRepository
+import com.adskipper.core.detect.AdEvidenceTracker
+import com.adskipper.core.detect.AdSdkSignatures
 import com.adskipper.core.detect.DetectionPipeline
 import com.adskipper.core.detect.NodeMatcher
 import com.adskipper.core.detect.SkipTarget
@@ -52,6 +55,7 @@ class AdSkipperService : AccessibilityService() {
 
     private lateinit var settingsRepo: SettingsRepository
     private lateinit var statsRepo: StatsRepository
+    private lateinit var profileRepo: AppProfileRepository
     private lateinit var modelManager: ModelManager
     private lateinit var engine: VlmEngine
     private lateinit var overlay: DebugOverlay
@@ -70,6 +74,14 @@ class AdSkipperService : AccessibilityService() {
 
     /** Active splash-window pollers, one per package. */
     private val pollJobs = ConcurrentHashMap<String, Job>()
+
+    /** Positive "this screen is an ad" evidence, per session; image L3 taps
+     *  require it. See [AdEvidenceTracker]. */
+    private val adEvidence = AdEvidenceTracker { android.os.SystemClock.elapsedRealtime() }
+
+    /** Session-start stamps whose outcome has been persisted, so a session
+     *  whose poller runs twice is counted once. */
+    private val recordedSessions = ConcurrentHashMap<String, Long>()
 
     /** Held for the duration of a splash window; see holdSplashWakeLock. */
     @Volatile
@@ -165,6 +177,7 @@ class AdSkipperService : AccessibilityService() {
         startKeepaliveForeground()
         settingsRepo = SettingsRepository(this)
         statsRepo = StatsRepository(this)
+        profileRepo = AppProfileRepository(this)
         modelManager = ModelManager(this)
         engine = VlmEngine()
         overlay = DebugOverlay(this)
@@ -313,8 +326,19 @@ class AdSkipperService : AccessibilityService() {
         val prevEvent = lastEventAt.put(pkg, now)
         if (prevEvent == null || now - prevEvent > SESSION_GAP_MS) {
             sessionStartAt[pkg] = now
+            adEvidence.onSessionStart(pkg)
         }
         val inSplashWindow = now - (sessionStartAt[pkg] ?: 0L) <= SPLASH_WINDOW_MS
+
+        // Splash-ad SDK activities announce themselves in window-state
+        // events (穿山甲 TTAppOpenAdActivity, 优量汇 ADActivity, …) — free,
+        // OCR-independent ad evidence.
+        if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
+            AdSdkSignatures.matchesClassName(event.className?.toString())
+        ) {
+            Timber.d("ad SDK window in %s: %s", pkg, event.className)
+            adEvidence.noteSdkSignal(pkg)
+        }
 
         // Splash ads only exist in the first seconds after an app (re)starts,
         // and that window is covered by a polling loop rather than by events:
@@ -349,24 +373,67 @@ class AdSkipperService : AccessibilityService() {
         val job = scope.launch(start = CoroutineStart.LAZY) {
             delay(SPLASH_POLL_INITIAL_DELAY_MS)
             var taps = 0
-            while (isActive && taps < SPLASH_MAX_TAPS) {
-                val s = settings.value
-                if (!s.masterEnabled) break
-                if (!s.layer1Enabled && !s.layer2Enabled && !s.layer3Enabled) break
-                val selfTesting = s.selfTest && pkg == packageName
-                if (selfTesting && !selfTestAdVisible) break
-                val start = sessionStartAt[pkg] ?: break
-                val elapsed = android.os.SystemClock.elapsedRealtime() - start
-                // Hupu's splash ad appeared ~8s after launch (slow app init on
-                // a white splash) and then played for ~40s in total event
-                // silence — a poller stopping at SPLASH_WINDOW_MS provides
-                // zero coverage for it. Poll up to the extended window; past
-                // the core window runDetection() only keeps image L3 enabled
-                // while the screen still looks like a splash (tiny node tree),
-                // so the feed never gets YOLO false-positive taps.
-                if (!selfTesting && elapsed > SPLASH_WINDOW_EXTENDED_MS) break
-                if (runDetection(pkg, s, l3Unrestricted = elapsed <= SPLASH_WINDOW_MS)) taps++
-                delay(SPLASH_POLL_INTERVAL_MS)
+            var ticks = 0
+            // Apps with a long ad-free history run in a degraded mode: L1
+            // only, no screenshots/OCR — near-zero cost and zero image-layer
+            // misclick surface. Every PROBE_EVERY-th session probes at full
+            // strength in case the app started showing ads; an SDK signal
+            // (event-driven, works regardless of mode) lifts the downgrade
+            // instantly.
+            val barren = if (pkg == packageName) 0 else try {
+                profileRepo.barrenSessions(pkg)
+            } catch (t: Throwable) {
+                Timber.w(t, "profile read failed"); 0
+            }
+            val downgraded = barren >= BARREN_SESSIONS_TO_DOWNGRADE &&
+                barren % PROBE_EVERY_SESSIONS != 0
+            if (downgraded) Timber.d("%s: %d ad-free sessions — L1-only mode", pkg, barren)
+            try {
+                while (isActive && taps < SPLASH_MAX_TAPS) {
+                    val s = settings.value
+                    if (!s.masterEnabled) break
+                    if (!s.layer1Enabled && !s.layer2Enabled && !s.layer3Enabled) break
+                    val selfTesting = s.selfTest && pkg == packageName
+                    if (selfTesting && !selfTestAdVisible) break
+                    val start = sessionStartAt[pkg] ?: break
+                    val elapsed = android.os.SystemClock.elapsedRealtime() - start
+                    // Hupu's splash ad appeared ~8s after launch (slow app
+                    // init on a white splash) and then played for ~40s in
+                    // total event silence — a poller stopping at
+                    // SPLASH_WINDOW_MS provides zero coverage for it. Poll to
+                    // the extended window, stretched further while a confirmed
+                    // countdown says the ad is still running.
+                    val deadline = maxOf(
+                        SPLASH_WINDOW_EXTENDED_MS,
+                        minOf(adEvidence.pollUntil(pkg) - start, SPLASH_WINDOW_HARD_CAP_MS),
+                    )
+                    if (!selfTesting && elapsed > deadline) break
+                    ticks++
+                    val effective =
+                        if (downgraded && !adEvidence.isAdConfirmed(pkg)) {
+                            s.copy(layer2Enabled = false, layer3Enabled = false)
+                        } else {
+                            s
+                        }
+                    if (runDetection(pkg, effective)) taps++
+                    delay(SPLASH_POLL_INTERVAL_MS)
+                }
+            } finally {
+                // Persist the session outcome once (poller may restart within
+                // the same session; count it a single time).
+                val startStamp = sessionStartAt[pkg]
+                if (pkg != packageName && ticks > 0 && startStamp != null &&
+                    recordedSessions.put(pkg, startStamp) != startStamp
+                ) {
+                    val adSeen = taps > 0 || adEvidence.isAdConfirmed(pkg)
+                    scope.launch {
+                        try {
+                            profileRepo.recordSession(pkg, adSeen, appVersionCode(pkg))
+                        } catch (t: Throwable) {
+                            Timber.w(t, "profile write failed")
+                        }
+                    }
+                }
             }
         }
         if (pollJobs.putIfAbsent(pkg, job) == null) {
@@ -478,13 +545,14 @@ class AdSkipperService : AccessibilityService() {
     }
 
     /** One pipeline pass; returns true when a target was found and tapped.
-     *  [l3Unrestricted] is true inside the core splash window, where image L3
-     *  may always run; outside it L3 stays enabled only while the screen
-     *  still plausibly is a splash ad (see [SPLASH_TREE_MAX_NODES]). */
+     *  Image L3 is double-gated: the screen must still look like a splash
+     *  (tiny node tree, [SPLASH_TREE_MAX_NODES]) AND the session must have
+     *  positive ad evidence ([AdEvidenceTracker]) — apps without splash ads
+     *  never produce the latter, so their launches never see an image-layer
+     *  tap at all. */
     private suspend fun runDetection(
         pkg: String,
         s: AppSettings,
-        l3Unrestricted: Boolean = true,
     ): Boolean {
         // Never detect or tap unless [pkg] owns the active window: transient
         // overlay windows (HyperOS permissioncontroller pops up during cold
@@ -498,14 +566,23 @@ class AdSkipperService : AccessibilityService() {
             )
             return false
         }
+        // Ad-SDK fingerprints in the tree are evidence too (cheap: splash
+        // trees are tiny and the walk is capped).
+        if (pkg != packageName && !adEvidence.isAdConfirmed(pkg) &&
+            NodeMatcher.hasAdSdkMarker(root, SDK_SCAN_NODE_CAP)
+        ) {
+            Timber.d("ad SDK marker in %s tree", pkg)
+            adEvidence.noteSdkSignal(pkg)
+        }
         var effective = s
-        if (!l3Unrestricted && s.layer3Enabled) {
+        if (s.layer3Enabled) {
             val treeSize = NodeMatcher.treeSize(root, SPLASH_TREE_MAX_NODES + 1)
             if (treeSize > SPLASH_TREE_MAX_NODES) {
                 effective = s.copy(layer3Enabled = false)
                 Timber.d("tree size %d+ — L3 off for this tick", treeSize)
             }
         }
+        val selfTesting = s.selfTest && pkg == packageName
         if (!processing.compareAndSet(false, true)) {
             Timber.d("detection already running, skip %s", pkg)
             return false
@@ -524,6 +601,15 @@ class AdSkipperService : AccessibilityService() {
                     }
                 },
                 settings = effective,
+                imageLayerGate = { lines ->
+                    // Feed this tick's OCR into the evidence tracker first, so
+                    // a badge/countdown visible right now unlocks L3 in the
+                    // same tick.
+                    adEvidence.observeOcr(pkg, lines)
+                    val open = selfTesting || adEvidence.isAdConfirmed(pkg)
+                    if (!open) Timber.d("no ad evidence in %s — image L3 gated", pkg)
+                    open
+                },
             )
             val target = result.target ?: run {
                 Timber.d("no target in %s, timings=%s", pkg, result.timings)
@@ -565,6 +651,12 @@ class AdSkipperService : AccessibilityService() {
         }
     }
 
+    private fun appVersionCode(pkg: String): Long = try {
+        packageManager.getPackageInfo(pkg, 0).longVersionCode
+    } catch (t: Throwable) {
+        -1L
+    }
+
     private fun performClick(x: Float, y: Float): Boolean {
         val path = Path().apply { moveTo(x, y) }
         val gesture = GestureDescription.Builder()
@@ -604,11 +696,25 @@ class AdSkipperService : AccessibilityService() {
          *  session starts. */
         private const val SPLASH_WINDOW_MS = 8000L
 
-        /** Hard cap on splash polling. Between SPLASH_WINDOW_MS and this,
-         *  ticks keep running but image L3 requires the splash-shaped-tree
-         *  check. Sized for slow-launching apps whose ad appears late and
-         *  plays long (hupu: white splash ~8s, then a ~40s silent ad). */
+        /** Default cap on splash polling. Sized for slow-launching apps whose
+         *  ad appears late and plays long (hupu: white splash ~8s, then a
+         *  ~40s silent ad). A confirmed countdown may stretch polling past
+         *  this, up to [SPLASH_WINDOW_HARD_CAP_MS]. */
         private const val SPLASH_WINDOW_EXTENDED_MS = 45_000L
+
+        /** Absolute ceiling on splash polling, countdown or not. */
+        private const val SPLASH_WINDOW_HARD_CAP_MS = 90_000L
+
+        /** Node budget for the per-tick ad-SDK fingerprint walk. */
+        private const val SDK_SCAN_NODE_CAP = 60
+
+        /** After this many consecutive ad-free splash sessions an app runs
+         *  in L1-only mode (no screenshots/OCR/image L3). */
+        private const val BARREN_SESSIONS_TO_DOWNGRADE = 15
+
+        /** Every Nth ad-free session of a downgraded app probes at full
+         *  strength, so an app that starts showing ads is re-detected. */
+        private const val PROBE_EVERY_SESSIONS = 5
 
         /** A screen whose node tree exceeds this is real app UI, not a
          *  splash ad (splash screens are a handful of ad-SDK views; feeds

@@ -146,6 +146,12 @@ class AdSkipperService : AccessibilityService() {
      *  whitelist never receive new defaults. */
     private var homePackages: Set<String> = emptySet()
 
+    /** Browser apps resolved from the device, always skipped: web pages are
+     *  full of "跳过/Skip" labels and ad-like imagery that L1–L3 would tap,
+     *  and a stray tap inside a page can navigate, submit or dismiss things
+     *  the user is reading. Splash-ad skipping is for native apps only. */
+    private var browserPackages: Set<String> = emptySet()
+
     /** This app's launcher label ("广告跳过") — it contains the keyword "跳过",
      *  so L1/L2 must never treat it as a skip button. */
     private var selfLabels: Set<String> = emptySet()
@@ -175,6 +181,7 @@ class AdSkipperService : AccessibilityService() {
             yolo?.warmUp()
         }
         homePackages = resolveHomePackages() + HOME_SURFACE_PACKAGES
+        browserPackages = resolveBrowserPackages() + BROWSER_PACKAGES - SPLASH_AD_BROWSERS
         selfLabels = setOf(applicationInfo.loadLabel(packageManager).toString())
         scope.launch { settingsRepo.seedDefaultLauncher() }
 
@@ -243,6 +250,23 @@ class AdSkipperService : AccessibilityService() {
         emptySet()
     }
 
+    /** Apps that handle a plain http URL with no host filter are browsers;
+     *  deep-link handlers for specific hosts don't match a bare host like
+     *  this one. The static BROWSER_PACKAGES list backstops OEM browsers
+     *  that hide from the query (e.g. behind role-based resolution). */
+    private fun resolveBrowserPackages(): Set<String> = try {
+        val intent = Intent(Intent.ACTION_VIEW, android.net.Uri.parse("http://example.invalid/"))
+            .addCategory(Intent.CATEGORY_BROWSABLE)
+        packageManager.queryIntentActivities(
+            intent,
+            PackageManager.ResolveInfoFlags.of(PackageManager.MATCH_ALL.toLong()),
+        ).mapTo(mutableSetOf()) { it.activityInfo.packageName }
+            .also { Timber.i("browser packages: %s", it) }
+    } catch (t: Throwable) {
+        Timber.e(t, "resolving browser packages failed")
+        emptySet()
+    }
+
     private suspend fun loadActiveModel(s: AppSettings) {
         val model = ModelCatalog.byId(s.activeModelId) ?: ModelCatalog.default
         val paths = modelManager.modelPaths(model)
@@ -274,7 +298,7 @@ class AdSkipperService : AccessibilityService() {
             }
             if (!s.selfTest || !selfTestAdVisible) return
         }
-        if (pkg in s.whitelist || pkg in homePackages) return
+        if (pkg in s.whitelist || pkg in homePackages || pkg in browserPackages) return
 
         val now = android.os.SystemClock.elapsedRealtime()
 
@@ -631,6 +655,37 @@ class AdSkipperService : AccessibilityService() {
             "com.android.quicksearchbox",             // MIUI/AOSP home search
             "com.google.android.googlequicksearchbox", // Google app / Pixel search
             "com.miui.personalassistant",             // MIUI minus-one screen
+        )
+
+        /** Common browsers, backstopping [resolveBrowserPackages] for OEM
+         *  builds where the intent query misses (role-gated resolution,
+         *  package-visibility filtering). Never detect or tap in these. */
+        private val BROWSER_PACKAGES = setOf(
+            "com.android.chrome",              // Chrome
+            "com.chrome.beta",
+            "com.chrome.dev",
+            "org.mozilla.firefox",             // Firefox
+            "com.microsoft.emmx",              // Edge
+            "com.opera.browser",
+            "com.brave.browser",
+            "com.android.browser",             // AOSP / MIUI CN browser
+            "com.mi.globalbrowser",            // Mi Browser (global)
+            "com.heytap.browser",              // OPPO
+            "com.coloros.browser",
+            "com.vivo.browser",
+            "com.huawei.browser",
+            "com.sec.android.app.sbrowser",    // Samsung Internet
+            "com.tencent.mtt",                 // QQ 浏览器
+            "com.baidu.browser.apps",          // 百度浏览器
+        )
+
+        /** CN browsers that show their own splash ads on launch — the user
+         *  wants those skipped, so they stay in the detection pipeline even
+         *  though the browser intent query resolves them. */
+        private val SPLASH_AD_BROWSERS = setOf(
+            "com.UCMobile",                    // UC 浏览器
+            "com.ucmobile.lite",
+            "com.quark.browser",               // 夸克
         )
     }
 }

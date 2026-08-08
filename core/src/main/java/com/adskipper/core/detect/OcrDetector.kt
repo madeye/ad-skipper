@@ -1,7 +1,6 @@
 package com.adskipper.core.detect
 
 import android.graphics.Bitmap
-import android.graphics.Point
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.TextRecognizer
@@ -22,30 +21,33 @@ import kotlin.coroutines.resume
  */
 class OcrDetector {
 
-    suspend fun findSkipButton(
-        bitmap: Bitmap,
-        keywords: Collection<String>,
-        excluded: Collection<String> = emptySet(),
-    ): Point? {
-        val client = recognizer ?: return null
+    /** One full OCR pass: every recognized line with its screen box. The
+     *  caller does keyword matching ([KeywordMatcher.findSkipLine]) and ad
+     *  evidence extraction ([AdEvidenceTracker.observeOcr]) from the same
+     *  result, so a tick pays for exactly one inference. */
+    suspend fun recognize(bitmap: Bitmap): List<OcrLine> {
+        val client = recognizer ?: return emptyList()
         return suspendCancellableCoroutine { cont ->
             client.process(InputImage.fromBitmap(bitmap, 0))
                 .addOnSuccessListener { result ->
-                    var point: Point? = null
-                    outer@ for (block in result.textBlocks) {
+                    val lines = ArrayList<OcrLine>()
+                    for (block in result.textBlocks) {
                         for (line in block.lines) {
-                            if (!KeywordMatcher.isPlausibleButtonText(line.text)) continue
-                            if (KeywordMatcher.matches(line.text, keywords, excluded) == null) continue
                             val box = line.boundingBox ?: continue
-                            point = Point(box.centerX(), box.centerY())
-                            break@outer
+                            lines += OcrLine(
+                                text = line.text,
+                                centerX = box.centerX(),
+                                centerY = box.centerY(),
+                                width = box.width(),
+                                height = box.height(),
+                            )
                         }
                     }
-                    cont.resume(point)
+                    cont.resume(lines)
                 }
                 .addOnFailureListener { e ->
                     Timber.w(e, "OCR failed")
-                    cont.resume(null)
+                    cont.resume(emptyList())
                 }
         }
     }

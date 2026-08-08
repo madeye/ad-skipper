@@ -25,4 +25,13 @@ object KeywordMatcher {
      *  content text, not a button. */
     fun isPlausibleButtonText(text: String?): Boolean =
         !text.isNullOrBlank() && text.trim().length <= 16
+
+    /** L2: first OCR line that reads like a skip button. */
+    fun findSkipLine(
+        lines: List<OcrLine>,
+        keywords: Collection<String>,
+        excluded: Collection<String> = emptySet(),
+    ): OcrLine? = lines.firstOrNull { line ->
+        isPlausibleButtonText(line.text) && matches(line.text, keywords, excluded) != null
+    }
 }

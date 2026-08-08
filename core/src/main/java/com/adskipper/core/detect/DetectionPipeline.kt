@@ -16,11 +16,18 @@ import com.adskipper.core.vlm.VlmEngine
  */
 class DetectionPipeline<I>(
     private val l1: suspend (root: AccessibilityNodeInfo?, keywords: Collection<String>) -> Pair<Float, Float>?,
-    private val l2: suspend (image: I, keywords: Collection<String>) -> Pair<Float, Float>?,
+    private val l2: suspend (image: I, keywords: Collection<String>) -> OcrPass,
     private val l3: suspend (image: I) -> Pair<Float, Float>?,
     private val l3yolo: suspend (image: I) -> Pair<Float, Float>? = { null },
     private val clock: () -> Long = { android.os.SystemClock.elapsedRealtime() },
 ) {
+
+    /** L2's full output: the skip-button hit (if any) plus every OCR line,
+     *  so callers can mine the same pass for ad evidence. */
+    data class OcrPass(
+        val hit: Pair<Float, Float>?,
+        val lines: List<OcrLine> = emptyList(),
+    )
 
     data class Result(
         val target: SkipTarget?,
@@ -28,10 +35,14 @@ class DetectionPipeline<I>(
         val timings: List<Pair<SkipLayer, Long>>,
     )
 
+    /** [imageLayerGate] decides — after seeing this tick's OCR lines —
+     *  whether the image layers (YOLO/VLM) may run and tap. Keyword layers
+     *  are never gated. Defaults to open for tests/tools. */
     suspend fun detect(
         root: AccessibilityNodeInfo?,
         screenshot: suspend () -> I?,
         settings: AppSettings,
+        imageLayerGate: suspend (lines: List<OcrLine>) -> Boolean = { true },
     ): Result {
         val timings = ArrayList<Pair<SkipLayer, Long>>(3)
 
@@ -44,19 +55,24 @@ class DetectionPipeline<I>(
             }
         }
 
-        // L2/L3 need pixels; skip if screenshot is unavailable (e.g. FLAG_SECURE).
+        // Everything below needs pixels.
+        if (!settings.layer2Enabled && !settings.layer3Enabled) return Result(null, timings)
+
+        // Screenshot unavailable (e.g. FLAG_SECURE) stops the pipeline.
         val bitmap = screenshot() ?: return Result(null, timings)
 
+        var lines: List<OcrLine> = emptyList()
         if (settings.layer2Enabled) {
             val t0 = clock()
-            val hit = l2(bitmap, settings.keywords)
+            val pass = l2(bitmap, settings.keywords)
+            lines = pass.lines
             timings += SkipLayer.L2_OCR to (clock() - t0)
-            if (hit != null) {
-                return Result(SkipTarget(hit.first, hit.second, SkipLayer.L2_OCR), timings)
+            pass.hit?.let {
+                return Result(SkipTarget(it.first, it.second, SkipLayer.L2_OCR), timings)
             }
         }
 
-        if (settings.layer3Enabled) {
+        if (settings.layer3Enabled && imageLayerGate(lines)) {
             val t0 = clock()
             val yoloHit = l3yolo(bitmap)
             timings += SkipLayer.L3_YOLO to (clock() - t0)
@@ -91,8 +107,9 @@ class DetectionPipeline<I>(
                         ?.let { it.exactCenterX() to it.exactCenterY() }
                 },
                 l2 = { bitmap, keywords ->
-                    ocr.findSkipButton(bitmap, keywords, selfLabels)
-                        ?.let { it.x.toFloat() to it.y.toFloat() }
+                    val lines = ocr.recognize(bitmap)
+                    val hit = KeywordMatcher.findSkipLine(lines, keywords, selfLabels)
+                    OcrPass(hit?.let { it.centerX.toFloat() to it.centerY.toFloat() }, lines)
                 },
                 l3yolo = { bitmap ->
                     yolo?.findSkipButton(bitmap)

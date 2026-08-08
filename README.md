@@ -1,6 +1,10 @@
-# Ad Skipper — 本地 VLM 开屏广告跳过
+# Ad Skipper — 本地模型开屏广告跳过
 
-基于 Android 无障碍服务的开屏广告自动跳过应用。检测采用三层降级策略：
+[![CI](https://github.com/madeye/ad-skipper/actions/workflows/ci.yml/badge.svg)](https://github.com/madeye/ad-skipper/actions/workflows/ci.yml)
+
+基于 Android 无障碍服务的开屏广告自动跳过应用，全部检测在本地完成。
+签名 APK 可在 [Releases](https://github.com/madeye/ad-skipper/releases) 直接下载。
+检测采用分层降级策略：
 
 | 层级 | 方式 | 典型延迟 | 适用场景 |
 |---|---|---|---|
@@ -19,7 +23,7 @@
 模拟开屏广告（首页 → 模拟广告测试，右上角为 跳过 30 倒计时按钮），
 无障碍服务约 1 秒内自动点击跳过并返回首页。真机效果见 v1.0 release notes。
 
-## 工程结构（仿 ../meow）
+## 工程结构
 
 ```
 buildSrc/          # setupCommon/setupCore/setupApp 构建约定
@@ -54,7 +58,10 @@ mobile/            # 应用模块：Compose UI（首页/设置/模型/统计）+
    adb install -r mobile/build/outputs/apk/debug/mobile-debug.apk
    ```
 
-Gradle 仓库优先使用阿里云镜像，国内可直接构建。
+依赖仓库官方源在前、阿里云镜像兜底，国内可直接构建。每次 push / PR 的
+CI（GitHub Actions，`.github/workflows/ci.yml`）会跑单元测试并完整构建
+APK（Linux runner 上从源码安装 Vulkan/SPIRV 头文件、用 NDK 自带 glslc，
+llama.cpp/ncnn 按上述步骤自动拉取），构建产物以 artifact 形式留存。
 
 ## GPU 推理
 
@@ -68,9 +75,10 @@ Host 端编译依赖（macOS）：
 brew install vulkan-headers spirv-headers shaderc   # glslc 由 shaderc 提供
 ```
 
-交叉编译的细节都在 `core/src/main/cpp/CMakeLists.txt`（约 29–90 行）：
+交叉编译的细节都在 `core/src/main/cpp/CMakeLists.txt`：
 
-- Vulkan 头文件取自 Homebrew 的 Khronos Vulkan-Headers，而非 NDK sysroot——
+- Vulkan 头文件取自 Khronos Vulkan-Headers（macOS 用 Homebrew，Linux 装到
+  `/usr/local`），而非 NDK sysroot——
   ggml-vulkan 需要的 `vulkan/vulkan.hpp` NDK 不自带；只有 `libvulkan.so`
   从 NDK 对应 `ANDROID_PLATFORM_LEVEL` 的 API 目录取用。
 - `vulkan-shaders-gen`（编译期生成 shader 的 host 工具）由嵌套 CMake
@@ -90,30 +98,36 @@ brew install vulkan-headers spirv-headers shaderc   # glslc 由 shaderc 提供
 
 1. 打开 App，按首页引导开启无障碍服务（设置 → 无障碍 → 广告跳过）。
 2. 默认 L1/L2/L3 全部开启：L3 首先运行内置的 YOLO11n 跳过按钮检测器
-   （在 2026-08 grounding 基准上 20/20 命中、0 次误点 CTA，超过 1.5GB 级
+   （在 2026-08 grounding 基准上 19/20 命中、0 次误点 CTA，超过 1.5GB 级
    VLM，见 [vlm-bench REPORT](https://github.com/madeye/vlm-bench/blob/main/REPORT.md)），无需下载。
    检测器跑在 ncnn 上（Vulkan compute，无 Vulkan / 驱动异常时自动回退
    CPU/NEON），模型为 Ultralytics 官方 NCNN 导出（fp16，约 5MB，val 集
    mAP50 0.992）。
-   图像类 L3 检测仅在应用会话开始后的前几秒（开屏广告窗口期）触发，
-   避免在普通界面误点。
+   开屏窗口期（应用会话开始后 8 秒内）由固定节奏轮询驱动：跳过启动过渡的
+   前 500ms（OEM 启动窗口显示的是上次会话的快照）后每 750ms 跑一遍管线，
+   命中后下个周期复查、未消失则重试（每会话最多 3 次点击）——开屏广告
+   往往在启动过渡后才渲染且不发无障碍事件，靠事件驱动会整场错过。
+   窗口期外仅事件驱动的 L1/L2 关键词层生效，图像层不运行，避免在普通界面误点。
+   服务同时以前台服务（specialUse 类型 + 常驻静默通知）保活，降低被
+   OEM 后台清理误杀的概率。
 3. 可选兜底：「模型」页可下载 VLM 处理 YOLO 未命中的疑难场景。推荐
    InternVL3 2B（Q4_K_M + Q8_0 mmproj，约 1.5GB，896px 输入 16/20 命中）；
    备选 Qwen2.5-VL 3B（约 2.8GB，672px 输入精度相当）。源：ModelScope，
    失败自动回退 hf-mirror；也支持手动导入 GGUF + mmproj，选中后自动切换。
 4. 「设置」页可配置关键词、白名单、调试悬浮窗（命中时显示层级与坐标）。
 
-构建期会从 ModelScope 下载内置模型（`:core:downloadBundledModel`，缓存于
-`core/build/`，不入 git）；APK 因此约 +266MB。
+APK 不内置 VLM（约 52MB，其中 YOLO 检测器约 5MB）；VLM 为可选下载项。
 
 ## 模型来源
 
-- 默认（内置 APK assets）：`ggml-org/SmolVLM2-256M-Video-Instruct-GGUF`（Q8_0，合计约 266MB，
-  秒级加载；256M 小模型 grounding 能力有限，复杂按钮可能定位不准）
-- 可下载：`ggml-org/Qwen2.5-VL-3B-Instruct-GGUF`、`bartowski/Qwen2-VL-2B-Instruct-GGUF`、
-  `OpenBMB/MiniCPM-V-2_6-gguf`（ModelScope 镜像优先，文件名已实测验证）
-- llama.cpp 侧：mtmd API（`tools/mtmd`），当前 pin 在 master `a1f96d4`，
-  升级 llama.cpp 后需重新验证 `vlm_jni.cpp` 的 API 兼容性。
+- 推荐下载：`ggml-org/InternVL3-2B-Instruct-GGUF`（Q4_K_M + Q8_0 mmproj，
+  约 1.5GB，896px 输入，基准 16/20 命中，为可用模型中最小）
+- 备选：`ggml-org/Qwen2.5-VL-3B-Instruct-GGUF`（约 2.8GB，672px 输入，
+  精度相当）；也支持经 SAF 手动导入任意 GGUF + mmproj（自定义模型）
+- 下载源 ModelScope 优先、hf-mirror 兜底（huggingface.co 国内不可达），
+  模型清单见 `core/src/main/java/com/adskipper/core/model/ModelInfo.kt`
+- llama.cpp 侧走 mtmd API（`tools/mtmd`）；构建时 clone 的是最新 master，
+  若上游 API 变动需同步调整 `vlm_jni.cpp`。
 
 ## YOLO 检测器训练
 
@@ -154,11 +168,13 @@ brew install vulkan-headers spirv-headers shaderc   # glslc 由 shaderc 提供
 ```
 
 模拟器端到端：安装后打开 App → 设置页开启「自测模式」→ 首页「模拟广告测试」，
-观察模拟广告页被自动点击「跳过」并关闭（统计页会新增一条 L1 记录）。
-**已在 Medium_Phone_API_36.1 模拟器上验证通过**（L1 命中 → 手势点击 → Room 统计落库）。
+观察模拟广告页被自动点击「跳过」并关闭（统计页新增一条记录）。已验证的链路
+（2026-08）：模拟器 debug/release（R8）构建下 L1 与 L2（关 L1/L3 后 OCR 命中）、
+模拟器 L3a YOLO（自测模式）；真机（Xiaomi 14 / HyperOS）L1、L2、L3a 及真实
+开屏广告（脉脉热启动）经开屏轮询成功跳过。
 
-注意：L3（VLM）链路已通过编译与 llama.cpp mtmd API 对齐验证，但端到端推理
-（下载 3.3GB 模型 + 真机推理）尚未在本环境实测，首次使用请先在真机上小流量验证。
+注意：L3b（VLM）链路已通过编译与 llama.cpp mtmd API 对齐验证，但端到端推理
+（下载约 1.5GB 模型 + 真机推理）尚未实测，首次使用请先小流量验证。
 
 ## 已知限制
 

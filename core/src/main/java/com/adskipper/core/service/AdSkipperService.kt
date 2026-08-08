@@ -21,6 +21,7 @@ import com.adskipper.core.data.AppSettings
 import com.adskipper.core.data.SettingsRepository
 import com.adskipper.core.data.StatsRepository
 import com.adskipper.core.detect.DetectionPipeline
+import com.adskipper.core.detect.NodeMatcher
 import com.adskipper.core.detect.SkipTarget
 import com.adskipper.core.detect.YoloSkipDetector
 import com.adskipper.core.model.ModelCatalog
@@ -331,10 +332,16 @@ class AdSkipperService : AccessibilityService() {
                 val selfTesting = s.selfTest && pkg == packageName
                 if (selfTesting && !selfTestAdVisible) break
                 val start = sessionStartAt[pkg] ?: break
-                if (!selfTesting &&
-                    android.os.SystemClock.elapsedRealtime() - start > SPLASH_WINDOW_MS
-                ) break
-                if (runDetection(pkg, s)) taps++
+                val elapsed = android.os.SystemClock.elapsedRealtime() - start
+                // Hupu's splash ad appeared ~8s after launch (slow app init on
+                // a white splash) and then played for ~40s in total event
+                // silence — a poller stopping at SPLASH_WINDOW_MS provides
+                // zero coverage for it. Poll up to the extended window; past
+                // the core window runDetection() only keeps image L3 enabled
+                // while the screen still looks like a splash (tiny node tree),
+                // so the feed never gets YOLO false-positive taps.
+                if (!selfTesting && elapsed > SPLASH_WINDOW_EXTENDED_MS) break
+                if (runDetection(pkg, s, l3Unrestricted = elapsed <= SPLASH_WINDOW_MS)) taps++
                 delay(SPLASH_POLL_INTERVAL_MS)
             }
         }
@@ -431,7 +438,7 @@ class AdSkipperService : AccessibilityService() {
             splashWakeLock = pm.newWakeLock(
                 PowerManager.PARTIAL_WAKE_LOCK,
                 "adskipper:splash",
-            ).apply { acquire(SPLASH_WINDOW_MS + 10_000L) } // auto-release backstop
+            ).apply { acquire(SPLASH_WINDOW_EXTENDED_MS + 10_000L) } // auto-release backstop
         } catch (t: Throwable) {
             Timber.w(t, "wake lock acquire failed")
         }
@@ -446,16 +453,34 @@ class AdSkipperService : AccessibilityService() {
         splashWakeLock = null
     }
 
-    /** One pipeline pass; returns true when a target was found and tapped. */
-    private suspend fun runDetection(pkg: String, s: AppSettings): Boolean {
+    /** One pipeline pass; returns true when a target was found and tapped.
+     *  [l3Unrestricted] is true inside the core splash window, where image L3
+     *  may always run; outside it L3 stays enabled only while the screen
+     *  still plausibly is a splash ad (see [SPLASH_TREE_MAX_NODES]). */
+    private suspend fun runDetection(
+        pkg: String,
+        s: AppSettings,
+        l3Unrestricted: Boolean = true,
+    ): Boolean {
         // Never detect or tap unless [pkg] owns the active window: transient
         // overlay windows (HyperOS permissioncontroller pops up during cold
         // starts) must neither be tapped themselves nor cause their
         // full-screen screenshot to be tapped at the ad's coordinates.
         val root = rootInActiveWindow
         if (root?.packageName?.toString() != pkg) {
-            Timber.d("active window is not %s, skip tick", pkg)
+            Timber.d(
+                "active window is %s, not %s, skip tick",
+                root?.packageName ?: "<null root>", pkg,
+            )
             return false
+        }
+        var effective = s
+        if (!l3Unrestricted && s.layer3Enabled) {
+            val treeSize = NodeMatcher.treeSize(root, SPLASH_TREE_MAX_NODES + 1)
+            if (treeSize > SPLASH_TREE_MAX_NODES) {
+                effective = s.copy(layer3Enabled = false)
+                Timber.d("tree size %d+ — L3 off for this tick", treeSize)
+            }
         }
         if (!processing.compareAndSet(false, true)) {
             Timber.d("detection already running, skip %s", pkg)
@@ -465,16 +490,16 @@ class AdSkipperService : AccessibilityService() {
         Timber.d("detecting in %s", pkg)
         val t0 = android.os.SystemClock.elapsedRealtime()
         try {
-            val model = ModelCatalog.byId(s.activeModelId) ?: ModelCatalog.default
-            val pipeline = DetectionPipeline.create(engine, s, model, yolo, selfLabels)
+            val model = ModelCatalog.byId(effective.activeModelId) ?: ModelCatalog.default
+            val pipeline = DetectionPipeline.create(engine, effective, model, yolo, selfLabels)
             val result = pipeline.detect(
                 root = root,
                 screenshot = {
                     ScreenshotCapturer.capture(this)?.also { bmp ->
-                        if (s.debugOverlay) dumpDebugFrame(bmp)
+                        if (effective.debugOverlay) dumpDebugFrame(bmp)
                     }
                 },
-                settings = s,
+                settings = effective,
             )
             val target = result.target ?: run {
                 Timber.d("no target in %s, timings=%s", pkg, result.timings)
@@ -551,8 +576,20 @@ class AdSkipperService : AccessibilityService() {
     companion object {
         private const val ATTEMPT_COOLDOWN_MS = 2000L
 
-        /** L3 image detectors only run this long after an app session starts. */
+        /** L3 image detectors run unconditionally this long after an app
+         *  session starts. */
         private const val SPLASH_WINDOW_MS = 8000L
+
+        /** Hard cap on splash polling. Between SPLASH_WINDOW_MS and this,
+         *  ticks keep running but image L3 requires the splash-shaped-tree
+         *  check. Sized for slow-launching apps whose ad appears late and
+         *  plays long (hupu: white splash ~8s, then a ~40s silent ad). */
+        private const val SPLASH_WINDOW_EXTENDED_MS = 45_000L
+
+        /** A screen whose node tree exceeds this is real app UI, not a
+         *  splash ad (splash screens are a handful of ad-SDK views; feeds
+         *  are hundreds of nodes). */
+        private const val SPLASH_TREE_MAX_NODES = 30
 
         /** Gap without events after which the next event starts a new session. */
         private const val SESSION_GAP_MS = 20_000L

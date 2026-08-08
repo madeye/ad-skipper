@@ -1,6 +1,6 @@
 # Ad Skipper — 开发状态记录
 
-> 更新时间：2026-08-07。仓库：https://github.com/madeye/ad-skipper （MIT, Copyright Max Lv）
+> 更新时间：2026-08-08。仓库：https://github.com/madeye/ad-skipper （MIT, Copyright Max Lv）
 
 ## 当前任务状态（TODO）
 
@@ -130,8 +130,96 @@
     手工构造 `llama_batch`，但从未设置 `batch.n_tokens`，导致第一个生成 token 上
     `llama_decode` 就返回 -1（这也是早期日志里 `infer done, output: �` 的成因）。
     → 改用 `llama_batch_get_one`。修复后模型能生成完整句子（验证中 43-token 回答）。
+13. **豆瓣开屏广告跳不过 —— 根因是 HyperOS GreezeManager 进程冻结**（2026-08-08 真机
+    排查，小米 14 Ultra / OS3.0.305）：冷启动豆瓣后无障碍服务进程在最后一个无障碍事件
+    后约 1s 被 cgroup 冻结（实测 `/sys/fs/cgroup/apps/uid_*/pid_*/cgroup.freeze=1` 贯穿
+    整个开屏窗口）。视频开屏广告不发无障碍事件，于是开屏轮询协程在广告出现时恰好拿不到
+    CPU —— 日志特征为「splash poller start + 1 个 tick 后彻底安静」。有 permissioncontroller
+    等事件刷屏的启动反而正常（每次 binder 投递会短暂解冻），所以之前脉脉热启动等验证都
+    碰巧通过。修复（多重）：
+    - **解冻脉冲（thaw pulse）**：开屏窗口期内让一个 1px 透明 accessibility overlay view
+      每 300ms 自发 `TYPE_WINDOW_CONTENT_CHANGED` 事件 → 事件投递解冻进程（约 1s 宽限）
+      → 解冻期间投递下一个脉冲，自持循环；窗口结束即停。实测整个窗口 freeze=0、轮询
+      每 750ms 正常执行。
+    - **唤醒锁无效**：`PARTIAL_WAKE_LOCK` 在冻结时被强制 DISABLED（dumpsys power 可见
+      ACQ 后约 1s 被 REL），GreezeManager 不尊重 wakelock。代码保留（其他 OEM 冻结器
+      可能尊重），但 HyperOS 上靠脉冲。
+    - **活跃窗口守卫**：检测/点击前校验 `rootInActiveWindow.packageName == pkg`，取代
+      旧的「其他包 WINDOW_STATE_CHANGED 即取消轮询器」逻辑（该取消正是压死轮询的另一
+      路径：permissioncontroller 瞬时窗口事件取消豆瓣轮询器后，广告不再发事件，轮询永不
+      恢复）。同时杜绝了「权限弹窗事件触发全屏截图 OCR 并按广告坐标点击」的乱点。
+    - **takeScreenshot 加 2s 超时**：之前回调不来会永久挂起检测协程并卡死 processing 锁。
+    - **NodeMatcher 全屏节点守卫**：豆瓣的 `id/skip` 是无文字、不可点击、bounds 全屏
+      （且对服务不可见，仅 uiautomator 可见）的容器；id 命中会点屏幕中心 = 点进广告落地页。
+      现丢弃面积超过根节点 1/3 的命中。
+    - **YOLO 预热**：ncnn 冷初始化（Vulkan + 建 pipeline + 载模型）约 3s，发生在窗内会
+      吃掉大半个窗口；改为 connect 后延迟 8s 预热。**注意**：connect 后 1-3s 内立即 init
+      会在 `ncnn::Net::load_model` 空指针 SIGSEGV（墓碑实测，uptime 3s），且服务崩溃后
+      系统不再重绑（Crashed services），HyperOS 又禁止 adb 写 secure settings，只能手动
+      重开无障碍开关 —— 必须延迟预热。
+    - 验证：连续多轮豆瓣冷启动，L2_OCR 命中真实跳过按钮 (951,173~175) 并在倒计时结束前
+      进入首页（截图确认）；脉冲停后 poller 正常退出。
+    - 调试辅助：debugOverlay 开启时把管线实际看到的每帧存到 `filesDir/shots/`（保留 12 张，
+      `adb exec-out run-as com.tangzixiang.adskipper cat files/shots/<ts>.png` 导出）。
+14. **重装/崩溃后的绑定恢复**：HyperOS 禁止 adb 写 secure settings（`settings put secure`
+    直接 SecurityException），`adb install -r` 或服务崩溃后绑定丢失时的 adb 恢复办法：
+    跑一次 `adb shell uiautomator dump`（UiAutomation 接入会触发无障碍重扫重绑）。崩溃
+    过多次的服务会进 Crashed services 列表不再自动重绑，重装可清除该状态。
+15. **冻结比 13 更致命：无障碍事件投递根本不解冻已冻结进程**（2026-08-08 下午真机复测，
+    fix/hyperos-persistent-freeze 分支）：13 的「脉冲仅在开屏窗口期运行」修复有个窗口外
+    死锁 —— 窗口结束脉冲停止后 ~1s 进程被冻结，此后豆瓣冷启动的事件**根本不会投递进来**
+    （logcat 零输出，`cgroup.freeze=1` 贯穿整个开屏），poller 压根不启动，之前修复全部
+    失效。13 里「binder 投递会短暂解冻」的推断是错的：只有事件到达时进程恰好未冻结才有效。
+    实测 `RUN_ANY_IN_BACKGROUND allow`、deviceidle whitelist 均无效（run-as 解冻后 ~2s
+    重新冻结）；GreezeManager 明确会解冻的只有 alarm（`THAW ... reason : alarm`）和
+    Activity Start。修复（多重）：
+    - **脉冲改为常驻**：只要屏幕亮着就持续运行（onServiceConnected 启动），不再限于开屏
+      窗口。关键性质：postDelayed 消息在冻结中不丢失，任何解冻后脉冲链自动续跑并从此保持
+      不冻结。SCREEN_OFF 停脉冲（灭屏无广告，允许冻结省电）；overlay view 常驻不反复增删。
+    - **看门狗 alarm**（60s，`setExact` + OnAlarmListener，`ELAPSED_REALTIME` 非唤醒型）：
+      冻结状态的保底解冻通道。非唤醒型零电量成本 —— 亮屏时脉冲本来就防冻结，睡眠中过期的
+      alarm 会在设备唤醒瞬间投递 = 正好在需要解冻的时刻解冻并重启脉冲。manifest 加
+      `USE_EXACT_ALARM`（侧载分发可用；上架 Play 需换 SCHEDULE_EXACT_ALARM 申请流程）。
+    - 验证：装新包后空闲 30s `cgroup.freeze=0`（旧包 ~2s 即 1）；连续 2 轮豆瓣冷启动
+      （adb `monkey` 拉起）均 L2_OCR 在 (950,174) 命中「跳过 5」胶囊并于倒计时结束前进入
+      首页（debugOverlay 显示 L2_OCR 412ms，filesDir/shots 帧转储确认素材）。
+
+16. **虎扑开屏广告全程无检测覆盖**（2026-08-08 傍晚真机排查）：虎扑冷启动是「白屏
+    ~8s（慢初始化）→ 广告出现 → 静默播放 ~40s」，而开屏轮询器固定 8s 撞墙 —— 广告
+    恰好在窗口过期时才出现，且静默广告不发事件，事件驱动路径也不触发：整个广告期间
+    检测次数为零（16:52 实测：窗口内仅 2 个有效 tick，全在白屏上）。修复：
+    - 轮询窗口延长到 45s 硬上限；超过核心 8s 窗口后，图像类 L3 仅在「界面仍像开屏」
+      时运行 —— 判据为节点树大小 ≤30（开屏/广告页只有少量 ad-SDK 容器节点，信息流
+      有数百节点，NodeMatcher.treeSize 带 cap 早退）。L1/L2 不受限（与事件驱动路径
+      同等风险）。实测信息流 tick 上「tree size 31+ — L3 off」正确触发。
+    - **YOLO 品牌区否决**：白屏上虎扑底部 logo 被 YOLO 以 conf 0.62 误报为跳过按钮
+      （两次复现，(539,2186)），点击无害但烧掉 SPLASH_MAX_TAPS 份额并污染统计。真实
+      跳过按钮从不在屏幕底部中央（品牌/slogan 区）：cy>0.80h 且 cx∈(0.25w,0.75w)
+      的检出直接丢弃。治本仍是按 README 流程收集真实截图微调（白屏 logo 帧已存
+      scratchpad hunt1/）。
+    - 增强日志：active-window guard 记录实际前台包名；NodeMatcher 记录命中节点的
+      text/desc/id/clickable/bounds；此前 16:50 曾有一次信息流上的 L1 命中 (933,2226)
+      节点不明，下次复现可定位。
+    - 附带发现：force-stop 后 20s 内重启同一 App 会被 SESSION_GAP_MS 判为同一会话，
+      不开新开屏窗口（连续测试需间隔 >20s；真实用户少受影响，已知限制）。
+    - 豆瓣回归通过（新包 L2_OCR 命中）。虎扑真实广告因频控（~10min 内仅出现 1 次）
+      尚未在新代码下复现命中，待自然使用验证。
 
 ## 待验证 / 风险
+
+- **豆瓣部分广告素材的检测召回**：修复冻结问题后，视频类开屏（右上角「跳过 N」灰字）
+  可被 L2_OCR 稳定命中；但实测一种静态图素材（右上角深色半透明胶囊「跳过 5」，压在
+  橙色 banner 上）连续 5 个 tick OCR/YOLO 均未命中（YOLO conf<0.55）。另有一轮出现
+  「点击 (951,173) 后广告仍在、之后多个 tick 又不再命中」的现象，怀疑 HyperOS 上
+  `takeScreenshot` 在转场期返回旧帧（screencap 与服务截图看到的内容不一致），需用
+  filesDir/shots 的帧转储确认是截图陈旧还是检测器盲区。若是后者，按 README 所述收集
+  真实截图微调 YOLO 是下一步。
+- **脉冲的电量影响**（15 改常驻后重新评估）：亮屏期间每 300ms 一个微型 binder 事件，
+  灭屏即停。待观察一整天实际耗电排名；若可感知，可考虑把亮屏时的脉冲间隔放宽到
+  500-800ms（需重新实测冻结宽限期），或仅在「近期有非白名单 App 启动」时提频。
+- **醒后 60s 盲区**：设备唤醒瞬间若看门狗 alarm 尚未到期（灭屏 <60s）且进程已冻结、
+  SCREEN_ON 广播未投递，最坏在唤醒后 60s 内启动的 App 会漏检。实测未复现（唤醒本身
+  常伴随可解冻的系统活动），暂不处理。
 
 - InternVL3-2B @896px 的真机延迟未实测（host 基准含加载约 3s；896px 的图像
   token 是 448px 的 4 倍）。若旗舰机也压不进 ~2s，可考虑 Qwen2.5-VL-3B @672px

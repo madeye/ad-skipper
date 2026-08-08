@@ -57,6 +57,14 @@ class YoloSkipDetector(private val context: Context) {
         }
     }
 
+    /** Build the native engine ahead of the first splash: cold init (Vulkan
+     *  device + model load) takes ~3s on a flagship, which would otherwise be
+     *  paid inside the first splash window after service (re)start. */
+    fun warmUp() {
+        if (!isReady) return
+        executor.execute { ensureInit() }
+    }
+
     // ---- executor thread only ----
 
     private fun detect(bitmap: Bitmap): Rect? {
@@ -89,6 +97,17 @@ class YoloSkipDetector(private val context: Context) {
         val cy = (out[ANCHORS + bi] - padY) / scale
         val bw = out[2 * ANCHORS + bi] / scale
         val bh = out[3 * ANCHORS + bi] / scale
+        // Branding-zone veto: splash screens put the app logo / slogan
+        // bottom-center, and the synthetic-trained model mistakes logos for
+        // skip buttons (hupu's logo scored 0.62). Real skip buttons hug a
+        // screen corner, never the bottom-center strip.
+        if (cy > bitmap.height * BRAND_ZONE_TOP &&
+            cx > bitmap.width * BRAND_ZONE_LEFT &&
+            cx < bitmap.width * BRAND_ZONE_RIGHT
+        ) {
+            Timber.d("YOLO hit conf=%.2f at (%.0f, %.0f) vetoed: branding zone", best, cx, cy)
+            return null
+        }
         Timber.d("YOLO hit conf=%.2f at (%.0f, %.0f) [%s]", best, cx, cy, backend)
         return Rect(
             (cx - bw / 2f).toInt().coerceIn(0, bitmap.width),
@@ -152,5 +171,11 @@ class YoloSkipDetector(private val context: Context) {
         const val IN_SIZE = 640
         const val ANCHORS = 8400
         const val CONF_THRESHOLD = 0.55f
+
+        /** Bottom-center strip where splash branding (logo/slogan) lives;
+         *  YOLO hits centered here are rejected as false positives. */
+        const val BRAND_ZONE_TOP = 0.80f
+        const val BRAND_ZONE_LEFT = 0.25f
+        const val BRAND_ZONE_RIGHT = 0.75f
     }
 }

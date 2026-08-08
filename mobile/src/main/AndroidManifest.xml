@@ -7,6 +7,17 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Splash-window wake lock: HyperOS GreezeManager cgroup-freezes this
+         process ~0.5s after the last accessibility event; a silent video
+         splash ad (e.g. Douban) emits none, so the poll loop would stop
+         getting CPU mid-window. Held only for the splash window. -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- Thaw-watchdog alarm: alarm delivery is the only mechanism HyperOS
+         GreezeManager reliably thaws a frozen process for; without it the
+         service stays frozen after a screen-off period and misses app
+         launches entirely. USE_EXACT_ALARM is auto-granted (app is
+         sideload-distributed; Play would restrict this permission). -->
+    <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
 
     <!-- List installed apps for the whitelist picker. -->
     <queries>

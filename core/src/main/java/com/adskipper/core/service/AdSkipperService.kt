@@ -181,7 +181,7 @@ class AdSkipperService : AccessibilityService() {
             yolo?.warmUp()
         }
         homePackages = resolveHomePackages() + HOME_SURFACE_PACKAGES
-        browserPackages = resolveBrowserPackages() + BROWSER_PACKAGES
+        browserPackages = resolveBrowserPackages() + BROWSER_PACKAGES - SPLASH_AD_BROWSERS
         selfLabels = setOf(applicationInfo.loadLabel(packageManager).toString())
         scope.launch { settingsRepo.seedDefaultLauncher() }
 
@@ -675,11 +675,17 @@ class AdSkipperService : AccessibilityService() {
             "com.vivo.browser",
             "com.huawei.browser",
             "com.sec.android.app.sbrowser",    // Samsung Internet
+            "com.tencent.mtt",                 // QQ 浏览器
+            "com.baidu.browser.apps",          // 百度浏览器
+        )
+
+        /** CN browsers that show their own splash ads on launch — the user
+         *  wants those skipped, so they stay in the detection pipeline even
+         *  though the browser intent query resolves them. */
+        private val SPLASH_AD_BROWSERS = setOf(
             "com.UCMobile",                    // UC 浏览器
             "com.ucmobile.lite",
-            "com.tencent.mtt",                 // QQ 浏览器
             "com.quark.browser",               // 夸克
-            "com.baidu.browser.apps",          // 百度浏览器
         )
     }
 }

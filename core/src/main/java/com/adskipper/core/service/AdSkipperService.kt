@@ -415,7 +415,7 @@ class AdSkipperService : AccessibilityService() {
                         } else {
                             s
                         }
-                    if (runDetection(pkg, effective)) taps++
+                    if (runDetection(pkg, effective, inCoreWindow = elapsed <= SPLASH_WINDOW_MS)) taps++
                     delay(SPLASH_POLL_INTERVAL_MS)
                 }
             } finally {
@@ -545,14 +545,18 @@ class AdSkipperService : AccessibilityService() {
     }
 
     /** One pipeline pass; returns true when a target was found and tapped.
-     *  Image L3 is double-gated: the screen must still look like a splash
-     *  (tiny node tree, [SPLASH_TREE_MAX_NODES]) AND the session must have
-     *  positive ad evidence ([AdEvidenceTracker]) — apps without splash ads
-     *  never produce the latter, so their launches never see an image-layer
-     *  tap at all. */
+     *  Image L3 always requires positive ad evidence ([AdEvidenceTracker]) —
+     *  apps without splash ads never produce it, so their launches never see
+     *  an image-layer tap. Outside the core splash window the screen must
+     *  additionally still look like a splash (tiny node tree). The tree check
+     *  must NOT apply inside the core window: Douban preloads its feed
+     *  beneath the splash ad, so the ad screen itself is 30+ nodes — a
+     *  universal tree gate kept L3 off for the entire ad (regression found
+     *  on-device 2026-08-09). */
     private suspend fun runDetection(
         pkg: String,
         s: AppSettings,
+        inCoreWindow: Boolean = false,
     ): Boolean {
         // Never detect or tap unless [pkg] owns the active window: transient
         // overlay windows (HyperOS permissioncontroller pops up during cold
@@ -575,7 +579,7 @@ class AdSkipperService : AccessibilityService() {
             adEvidence.noteSdkSignal(pkg)
         }
         var effective = s
-        if (s.layer3Enabled) {
+        if (s.layer3Enabled && !inCoreWindow) {
             val treeSize = NodeMatcher.treeSize(root, SPLASH_TREE_MAX_NODES + 1)
             if (treeSize > SPLASH_TREE_MAX_NODES) {
                 effective = s.copy(layer3Enabled = false)
@@ -662,7 +666,19 @@ class AdSkipperService : AccessibilityService() {
         val gesture = GestureDescription.Builder()
             .addStroke(GestureDescription.StrokeDescription(path, 0, TAP_DURATION_MS))
             .build()
-        return dispatchGesture(gesture, null, null)
+        // The system can cancel a dispatched gesture (touch collisions,
+        // window transitions) and the ad plays on as if never tapped — log
+        // the outcome so those runs are diagnosable from logcat.
+        val callback = object : AccessibilityService.GestureResultCallback() {
+            override fun onCompleted(g: GestureDescription?) {
+                Timber.d("tap completed at (%.0f, %.0f)", x, y)
+            }
+
+            override fun onCancelled(g: GestureDescription?) {
+                Timber.w("tap CANCELLED at (%.0f, %.0f)", x, y)
+            }
+        }
+        return dispatchGesture(gesture, callback, pulseHandler)
     }
 
     override fun onInterrupt() {
